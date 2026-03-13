@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "braidcodec"
+dynamic = ["version"]
+description = "Topological data codec using braid group equations"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+authors = [{ name = "Mehdi" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=2.4.3,<3",
+    "msgpack>=1.1.2,<2",
+    "blake3>=1.0.8,<2",
+]
+
+[project.optional-dependencies]
+quantum = ["qiskit>=1.0"]
+cli = ["click>=8.0"]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-benchmark>=5.2.3",
+    "hypothesis>=6.151.9",
+    "mypy>=1.19.1",
+    "ruff>=0.15.6",
+    "pre-commit>=4.5.1",
+]
+
+[project.scripts]
+braidcodec = "braidcodec.cli.main:cli"
+
+[tool.setuptools.dynamic]
+version = { attr = "braidcodec._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+braidcodec = ["py.typed"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "TCH", "RUF", "ARG", "PTH"]
+ignore = [
+    "RUF001",  # Ambiguous Unicode in strings (mathematical symbols: σ, ×, −)
+    "RUF002",  # Ambiguous Unicode in docstrings (mathematical notation)
+    "RUF003",  # Ambiguous Unicode in comments (mathematical notation)
+    "N802",    # Function names like get_kauffman_A (physics convention)
+    "N803",    # Argument names like K0, E (physics convention)
+    "N806",    # Variable names like R, A, I2, D (matrix algebra convention)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["braidcodec"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["qiskit.*", "msgpack.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["braidcodec"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
