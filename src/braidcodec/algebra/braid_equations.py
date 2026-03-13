@@ -49,7 +49,14 @@ class BraidEquation:
         Whether this braid has been simplified.
     """
 
-    __slots__ = ("braid_matrix", "generators", "n_strands", "sector", "simplified")
+    __slots__ = (
+        "_sector_params",
+        "braid_matrix",
+        "generators",
+        "n_strands",
+        "sector",
+        "simplified",
+    )
 
     def __init__(
         self,
@@ -58,6 +65,7 @@ class BraidEquation:
         *,
         sector: str = "Identity",
         simplified: bool = False,
+        _sector_params: dict[str, float] | None = None,
     ):
         if n_strands < 2:
             msg = f"Need ≥2 strands, got {n_strands}"
@@ -74,6 +82,7 @@ class BraidEquation:
         self.braid_matrix: np.ndarray | None = None
         self.sector: str = sector
         self.simplified: bool = simplified
+        self._sector_params: dict[str, float] | None = _sector_params
 
     # -- dunder methods -------------------------------------------------------
 
@@ -98,6 +107,7 @@ class BraidEquation:
             [-g for g in reversed(self.generators)],
             sector=self.sector,
             simplified=False,
+            _sector_params=self._sector_params,
         )
 
     def __repr__(self) -> str:
@@ -120,7 +130,12 @@ class BraidEquation:
 # =============================================================================
 
 
-def get_sector_r_matrix(sector: str, inverse: bool) -> np.ndarray:
+def get_sector_r_matrix(
+    sector: str,
+    inverse: bool,
+    *,
+    theta_override: float | None = None,
+) -> np.ndarray:
     """4×4 unitary phased-SWAP R-matrix for a given anyon sector.
 
     R(α,β,γ) = diag(e^{iα}, 0, 0, e^{iγ}) with off-diag e^{iβ} SWAP block.
@@ -131,13 +146,17 @@ def get_sector_r_matrix(sector: str, inverse: bool) -> np.ndarray:
         One of "Identity", "TSR", "Ising", "Fibonacci", "SU2k2".
     inverse : bool
         If True, return R⁻¹ = R†.
+    theta_override : float | None
+        If set, use this theta instead of the sector-derived value.
 
     Returns
     -------
     np.ndarray
         4×4 complex unitary matrix.
     """
-    if sector in ("Identity", "TSR"):
+    if theta_override is not None:
+        theta = theta_override
+    elif sector in ("Identity", "TSR"):
         theta = math.pi * C_CONSTANT
     elif sector == "Ising":
         theta = math.pi / 4
@@ -167,7 +186,14 @@ def get_sector_r_matrix(sector: str, inverse: bool) -> np.ndarray:
     return R
 
 
-def get_braid_generator_matrix(i: int, n: int, inverse: bool, sector: str) -> np.ndarray:
+def get_braid_generator_matrix(
+    i: int,
+    n: int,
+    inverse: bool,
+    sector: str,
+    *,
+    theta_override: float | None = None,
+) -> np.ndarray:
     """Full d^n × d^n unitary matrix for generator σᵢ on n strands.
 
     Builds I^{⊗(i-1)} ⊗ R ⊗ I^{⊗(n-i-1)} via Kronecker products.
@@ -182,6 +208,8 @@ def get_braid_generator_matrix(i: int, n: int, inverse: bool, sector: str) -> np
         If True, use R⁻¹.
     sector : str
         Anyon sector.
+    theta_override : float | None
+        If set, override the sector-derived theta for R-matrix construction.
 
     Returns
     -------
@@ -193,7 +221,7 @@ def get_braid_generator_matrix(i: int, n: int, inverse: bool, sector: str) -> np
         raise ValueError(msg)
 
     d = 2
-    R = get_sector_r_matrix(sector, inverse)
+    R = get_sector_r_matrix(sector, inverse, theta_override=theta_override)
     I2 = np.eye(d, dtype=np.complex128)
 
     result: np.ndarray = np.array([[1.0 + 0j]], dtype=np.complex128)
@@ -233,10 +261,12 @@ def contract_braid_tensor(braid: BraidEquation) -> np.ndarray:
 
     result = np.eye(D, dtype=np.complex128)
 
+    theta_ov = braid._sector_params.get("theta") if braid._sector_params else None
+
     for gen in braid.generators:
         i = abs(gen)
         inv_flag = gen < 0
-        mat = get_braid_generator_matrix(i, n, inv_flag, braid.sector)
+        mat = get_braid_generator_matrix(i, n, inv_flag, braid.sector, theta_override=theta_ov)
         result = mat @ result
 
     braid.braid_matrix = result
@@ -268,6 +298,7 @@ def simplify_braid(braid: BraidEquation) -> BraidEquation:
         gens,
         sector=braid.sector,
         simplified=True,
+        _sector_params=braid._sector_params,
     )
 
 
@@ -331,6 +362,7 @@ def compose(b1: BraidEquation, b2: BraidEquation) -> BraidEquation:
         b1.generators + b2.generators,
         sector=b1.sector,
         simplified=False,
+        _sector_params=b1._sector_params,
     )
 
 
@@ -372,6 +404,13 @@ def get_kauffman_A(sector: str) -> complex:
         raise ValueError(f"Unknown sector: {sector}")
 
 
+def _get_effective_A(braid: BraidEquation) -> complex:
+    """Kauffman A parameter, respecting keyed ``_sector_params``."""
+    if braid._sector_params and "theta" in braid._sector_params:
+        return complex(np.exp(1j * braid._sector_params["theta"] / 4))
+    return get_kauffman_A(braid.sector)
+
+
 def count_loops_in_smoothing(n: int, gens: list[int], state: int) -> int:
     """Count closed loops when braid is closed with given smoothing state."""
     # connections[i] = what strand i maps to (0-indexed internally)
@@ -411,7 +450,7 @@ def kauffman_bracket(braid: BraidEquation) -> complex:
     Satisfies skein relation:
         ⟨crossing⟩ = A⟨0-smoothing⟩ + A⁻¹⟨1-smoothing⟩
     """
-    A = get_kauffman_A(braid.sector)
+    A = _get_effective_A(braid)
     n = braid.n_strands
     gens = braid.generators
 
@@ -443,7 +482,7 @@ def jones_polynomial(braid: BraidEquation) -> complex:
 
     Topological invariant: unchanged under Reidemeister moves.
     """
-    A = get_kauffman_A(braid.sector)
+    A = _get_effective_A(braid)
     w = writhe(braid)
     bracket = kauffman_bracket(braid)
     return complex(((-(A**3)) ** (-w)) * bracket)
