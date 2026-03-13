@@ -1,0 +1,592 @@
+"""Tests for braidcodec._exceptions and braidcodec.codec.schema.
+
+Covers:
+  - Exception hierarchy: inheritance chains, context dict
+  - EncodedBlock: construction per tier, properties, to_dict/from_dict, validation
+  - EncodedStream: to_bytes/from_bytes round-trip, multi-block, metadata
+  - Corruption: bad magic, bad version, truncation, digest tampering, bit-flips
+  - Hypothesis: round-trip + random corruption detection
+"""
+
+from __future__ import annotations
+
+import struct
+
+import blake3
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from braidcodec._exceptions import (
+    BraidCodecError,
+    BraidKeyError,
+    ChecksumError,
+    ChunkError,
+    CompressionError,
+    ContractionError,
+    DigestError,
+    EncodingError,
+    FermionError,
+    FormatError,
+    IntegrityError,
+    JonesError,
+    KeyMismatchError,
+    KeyValidationError,
+    MagicMismatchError,
+    RewriteVerificationError,
+    TraceError,
+    VersionError,
+    WritheError,
+)
+from braidcodec.codec.schema import EncodedBlock, EncodedStream
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Exception hierarchy tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestExceptionHierarchy:
+    """Verify inheritance chains and structured context."""
+
+    def test_base_stores_context(self) -> None:
+        err = BraidCodecError("boom", key="val", num=42)
+        assert str(err) == "boom"
+        assert err.context == {"key": "val", "num": 42}
+
+    def test_base_empty_context(self) -> None:
+        err = BraidCodecError("simple")
+        assert err.context == {}
+
+    @pytest.mark.parametrize(
+        ("cls", "parent"),
+        [
+            (FormatError, BraidCodecError),
+            (MagicMismatchError, FormatError),
+            (VersionError, FormatError),
+            (DigestError, FormatError),
+            (BraidKeyError, BraidCodecError),
+            (KeyMismatchError, BraidKeyError),
+            (KeyValidationError, BraidKeyError),
+            (IntegrityError, BraidCodecError),
+            (WritheError, IntegrityError),
+            (JonesError, IntegrityError),
+            (TraceError, IntegrityError),
+            (FermionError, IntegrityError),
+            (ChecksumError, IntegrityError),
+            (EncodingError, BraidCodecError),
+            (ChunkError, EncodingError),
+            (ContractionError, EncodingError),
+            (CompressionError, BraidCodecError),
+            (RewriteVerificationError, CompressionError),
+        ],
+    )
+    def test_inheritance(self, cls: type, parent: type) -> None:
+        assert issubclass(cls, parent)
+
+    def test_all_catchable_by_base(self) -> None:
+        """Every leaf exception is catchable via BraidCodecError."""
+        leaves = [
+            MagicMismatchError,
+            VersionError,
+            DigestError,
+            KeyMismatchError,
+            KeyValidationError,
+            WritheError,
+            JonesError,
+            TraceError,
+            FermionError,
+            ChecksumError,
+            ChunkError,
+            ContractionError,
+            RewriteVerificationError,
+        ]
+        for cls in leaves:
+            with pytest.raises(BraidCodecError):
+                raise cls("test")
+
+    def test_integrity_subtypes(self) -> None:
+        """All 5 integrity error subtypes are IntegrityError."""
+        for cls in [WritheError, JonesError, TraceError, FermionError, ChecksumError]:
+            assert issubclass(cls, IntegrityError)
+            err = cls("fail", channel="test")
+            assert err.context["channel"] == "test"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EncodedBlock tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+# -- Tier fixtures --
+
+_TIER1 = EncodedBlock(
+    generators=[1, -2, 3],
+    n_strands=4,
+    sector="TSR",
+    writhe=1,
+    block_index=0,
+    original_length=5,
+    invariant_tier=1,
+)
+
+_TIER2 = EncodedBlock(
+    generators=[1, 2],
+    n_strands=3,
+    sector="Ising",
+    writhe=2,
+    block_index=1,
+    original_length=4,
+    invariant_tier=2,
+    jones_real=0.5,
+    jones_imag=-0.3,
+)
+
+_TIER3 = EncodedBlock(
+    generators=[1, -1, 2],
+    n_strands=4,
+    sector="Fibonacci",
+    writhe=0,
+    block_index=2,
+    original_length=8,
+    invariant_tier=3,
+    trace_real=2.1,
+    trace_imag=-1.4,
+)
+
+
+class TestEncodedBlockConstruction:
+    """Verify dataclass construction enforces tier constraints."""
+
+    def test_tier1_no_invariants(self) -> None:
+        assert _TIER1.jones is None
+        assert _TIER1.trace_invariant is None
+
+    def test_tier2_jones_present(self) -> None:
+        assert _TIER2.jones == complex(0.5, -0.3)
+        assert _TIER2.trace_invariant is None
+
+    def test_tier3_trace_present(self) -> None:
+        assert _TIER3.trace_invariant == complex(2.1, -1.4)
+        assert _TIER3.jones is None
+
+    def test_invalid_tier_value(self) -> None:
+        with pytest.raises(FormatError, match="invariant_tier must be 1, 2, or 3"):
+            EncodedBlock(
+                generators=[1],
+                n_strands=2,
+                sector="TSR",
+                writhe=1,
+                block_index=0,
+                original_length=1,
+                invariant_tier=4,
+            )
+
+    def test_tier1_with_jones_rejected(self) -> None:
+        with pytest.raises(FormatError, match=r"Tier 1.*Jones"):
+            EncodedBlock(
+                generators=[1],
+                n_strands=2,
+                sector="TSR",
+                writhe=1,
+                block_index=0,
+                original_length=1,
+                invariant_tier=1,
+                jones_real=1.0,
+                jones_imag=0.0,
+            )
+
+    def test_tier1_with_trace_rejected(self) -> None:
+        with pytest.raises(FormatError, match=r"Tier 1.*trace"):
+            EncodedBlock(
+                generators=[1],
+                n_strands=2,
+                sector="TSR",
+                writhe=1,
+                block_index=0,
+                original_length=1,
+                invariant_tier=1,
+                trace_real=1.0,
+                trace_imag=0.0,
+            )
+
+    def test_tier2_missing_jones_rejected(self) -> None:
+        with pytest.raises(FormatError, match=r"Tier 2.*jones"):
+            EncodedBlock(
+                generators=[1],
+                n_strands=2,
+                sector="TSR",
+                writhe=1,
+                block_index=0,
+                original_length=1,
+                invariant_tier=2,
+            )
+
+    def test_tier2_with_trace_rejected(self) -> None:
+        with pytest.raises(FormatError, match=r"Tier 2.*trace"):
+            EncodedBlock(
+                generators=[1],
+                n_strands=2,
+                sector="TSR",
+                writhe=1,
+                block_index=0,
+                original_length=1,
+                invariant_tier=2,
+                jones_real=1.0,
+                jones_imag=2.0,
+                trace_real=0.5,
+                trace_imag=0.5,
+            )
+
+    def test_tier3_missing_trace_rejected(self) -> None:
+        with pytest.raises(FormatError, match=r"Tier 3.*trace"):
+            EncodedBlock(
+                generators=[1],
+                n_strands=2,
+                sector="TSR",
+                writhe=1,
+                block_index=0,
+                original_length=1,
+                invariant_tier=3,
+            )
+
+    def test_tier3_with_jones_rejected(self) -> None:
+        with pytest.raises(FormatError, match=r"Tier 3.*Jones"):
+            EncodedBlock(
+                generators=[1],
+                n_strands=2,
+                sector="TSR",
+                writhe=1,
+                block_index=0,
+                original_length=1,
+                invariant_tier=3,
+                trace_real=1.0,
+                trace_imag=0.0,
+                jones_real=1.0,
+                jones_imag=0.0,
+            )
+
+    def test_frozen_enforcement(self) -> None:
+        with pytest.raises(AttributeError):
+            _TIER1.writhe = 99  # type: ignore[misc]
+
+
+class TestEncodedBlockDictRoundTrip:
+    """Verify to_dict / from_dict serialization."""
+
+    @pytest.mark.parametrize("block", [_TIER1, _TIER2, _TIER3], ids=["t1", "t2", "t3"])
+    def test_roundtrip(self, block: EncodedBlock) -> None:
+        d = block.to_dict()
+        recovered = EncodedBlock.from_dict(d)
+        assert recovered == block
+
+    def test_missing_required_key(self) -> None:
+        d = _TIER1.to_dict()
+        del d["generators"]
+        with pytest.raises(FormatError, match="missing required keys"):
+            EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+
+    def test_bad_type_coercion(self) -> None:
+        d = _TIER1.to_dict()
+        d["generators"] = "not_a_list"
+        # from_dict calls list("not_a_list") which makes a list of chars — valid
+        # But n_strands="bogus" would fail at int()
+        d["n_strands"] = "bogus"
+        with pytest.raises(FormatError, match="Invalid EncodedBlock data"):
+            EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+
+    def test_empty_generators(self) -> None:
+        block = EncodedBlock(
+            generators=[],
+            n_strands=2,
+            sector="TSR",
+            writhe=0,
+            block_index=0,
+            original_length=0,
+            invariant_tier=1,
+        )
+        d = block.to_dict()
+        recovered = EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+        assert recovered.generators == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EncodedStream round-trip tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _make_checksum(data: bytes = b"Hello") -> bytes:
+    return blake3.blake3(data).digest()
+
+
+def _make_stream(
+    blocks: tuple[EncodedBlock, ...] | None = None,
+    **kwargs: object,
+) -> EncodedStream:
+    """Convenience factory with sensible defaults."""
+    defaults: dict[str, object] = {
+        "blocks": (_TIER1,) if blocks is None else blocks,
+        "n_strands": 4,
+        "sector": "TSR",
+        "total_bytes": 5,
+        "checksum": _make_checksum(),
+        "timestamp": 1_000_000_000,
+        "metadata": {},
+    }
+    defaults.update(kwargs)
+    return EncodedStream(**defaults)  # type: ignore[arg-type]
+
+
+class TestEncodedStreamRoundTrip:
+    """Verify to_bytes / from_bytes produce identical streams."""
+
+    def test_single_block(self) -> None:
+        stream = _make_stream()
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert recovered.version == stream.version
+        assert recovered.n_strands == stream.n_strands
+        assert recovered.sector == stream.sector
+        assert recovered.total_bytes == stream.total_bytes
+        assert recovered.checksum == stream.checksum
+        assert recovered.timestamp == stream.timestamp
+        assert recovered.metadata == stream.metadata
+        assert len(recovered.blocks) == 1
+        assert recovered.blocks[0] == _TIER1
+
+    def test_multiple_blocks_mixed_tiers(self) -> None:
+        stream = _make_stream(blocks=(_TIER1, _TIER2, _TIER3))
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert len(recovered.blocks) == 3
+        assert recovered.blocks[0] == _TIER1
+        assert recovered.blocks[1] == _TIER2
+        assert recovered.blocks[2] == _TIER3
+
+    def test_metadata_preserved(self) -> None:
+        meta = {"encoder_version": "0.1.0", "note": "test"}
+        stream = _make_stream(metadata=meta)
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert recovered.metadata == meta
+
+    def test_large_metadata(self) -> None:
+        meta = {f"key_{i}": f"value_{i}" for i in range(100)}
+        stream = _make_stream(metadata=meta)
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert recovered.metadata == meta
+
+    def test_binary_checksum_preserved(self) -> None:
+        cksum = bytes(range(32))
+        stream = _make_stream(checksum=cksum)
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert recovered.checksum == cksum
+
+    def test_version_field(self) -> None:
+        stream = _make_stream()
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert recovered.version == 1
+
+    def test_empty_blocks_list(self) -> None:
+        stream = _make_stream(blocks=())
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert len(recovered.blocks) == 0
+
+    def test_wire_starts_with_magic(self) -> None:
+        wire = _make_stream().to_bytes()
+        assert wire[:4] == b"BRDC"
+
+    def test_wire_ends_with_32_byte_digest(self) -> None:
+        wire = _make_stream().to_bytes()
+        payload = wire[:-32]
+        expected = blake3.blake3(payload).digest()
+        assert wire[-32:] == expected
+
+    def test_from_bytes_accepts_bytearray(self) -> None:
+        wire = _make_stream().to_bytes()
+        recovered = EncodedStream.from_bytes(bytearray(wire))
+        assert recovered.n_strands == 4
+
+    def test_from_bytes_accepts_memoryview(self) -> None:
+        wire = _make_stream().to_bytes()
+        recovered = EncodedStream.from_bytes(memoryview(wire))
+        assert recovered.n_strands == 4
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Corruption / error detection tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestCorruptionDetection:
+    """Verify that corrupted wire data raises the correct exception."""
+
+    def test_bad_magic(self) -> None:
+        wire = bytearray(_make_stream().to_bytes())
+        wire[0:4] = b"XXXX"
+        with pytest.raises(MagicMismatchError, match="BRDC"):
+            EncodedStream.from_bytes(bytes(wire))
+
+    def test_unsupported_version(self) -> None:
+        wire = bytearray(_make_stream().to_bytes())
+        # Set version to 99 and recompute digest
+        struct.pack_into(">H", wire, 4, 99)
+        _recompute_digest(wire)
+        with pytest.raises(VersionError, match="99"):
+            EncodedStream.from_bytes(bytes(wire))
+
+    def test_truncated_too_short(self) -> None:
+        with pytest.raises(FormatError, match="too short"):
+            EncodedStream.from_bytes(b"BRDC" + b"\x00" * 10)
+
+    def test_corrupted_digest_flip_bit(self) -> None:
+        wire = bytearray(_make_stream().to_bytes())
+        wire[-1] ^= 0xFF  # flip last byte of digest
+        with pytest.raises(DigestError, match="digest mismatch"):
+            EncodedStream.from_bytes(bytes(wire))
+
+    def test_corrupted_header_content(self) -> None:
+        wire = bytearray(_make_stream().to_bytes())
+        # Corrupt a byte in the header region (after magic+version+header_len = offset 10)
+        wire[12] ^= 0xFF
+        _recompute_digest(wire)
+        # Should fail during msgpack unpack or dict parsing
+        with pytest.raises((FormatError, Exception)):
+            EncodedStream.from_bytes(bytes(wire))
+
+    def test_corrupted_block_content(self) -> None:
+        wire = bytearray(_make_stream().to_bytes())
+        # Corrupt a byte near the middle (likely inside block data)
+        mid = len(wire) // 2
+        wire[mid] ^= 0xFF
+        _recompute_digest(wire)
+        with pytest.raises((FormatError, Exception)):
+            EncodedStream.from_bytes(bytes(wire))
+
+    def test_truncated_header_length(self) -> None:
+        wire = bytearray(_make_stream().to_bytes())
+        # Set header_len to something huge
+        struct.pack_into(">I", wire, 6, 999999)
+        _recompute_digest(wire)
+        with pytest.raises(FormatError, match="exceeds"):
+            EncodedStream.from_bytes(bytes(wire))
+
+    def test_data_under_46_bytes(self) -> None:
+        with pytest.raises(FormatError, match="too short"):
+            EncodedStream.from_bytes(b"\x00" * 45)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hypothesis property tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _block_strategy(tier: int) -> st.SearchStrategy[EncodedBlock]:
+    """Strategy for a valid EncodedBlock of the given tier."""
+    base = {
+        "generators": st.lists(
+            st.integers(min_value=-5, max_value=5).filter(lambda x: x != 0),
+            min_size=1,
+            max_size=32,
+        ),
+        "n_strands": st.integers(min_value=2, max_value=6),
+        "sector": st.sampled_from(["TSR", "Ising", "Fibonacci", "Identity", "SU2k2"]),
+        "writhe": st.integers(min_value=-100, max_value=100),
+        "block_index": st.integers(min_value=0, max_value=1000),
+        "original_length": st.integers(min_value=0, max_value=64),
+        "invariant_tier": st.just(tier),
+    }
+    if tier == 1:
+        pass
+    elif tier == 2:
+        base["jones_real"] = st.floats(
+            min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
+        )
+        base["jones_imag"] = st.floats(
+            min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
+        )
+    elif tier == 3:
+        base["trace_real"] = st.floats(
+            min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
+        )
+        base["trace_imag"] = st.floats(
+            min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
+        )
+    return st.builds(EncodedBlock, **base)
+
+
+_any_block_st = st.one_of(_block_strategy(1), _block_strategy(2), _block_strategy(3))
+
+
+def _stream_strategy() -> st.SearchStrategy[EncodedStream]:
+    return st.builds(
+        EncodedStream,
+        blocks=st.lists(_any_block_st, min_size=0, max_size=5).map(tuple),
+        n_strands=st.integers(min_value=2, max_value=6),
+        sector=st.sampled_from(["TSR", "Ising", "Fibonacci"]),
+        total_bytes=st.integers(min_value=0, max_value=100000),
+        checksum=st.binary(min_size=32, max_size=32),
+        timestamp=st.integers(min_value=0, max_value=2**63 - 1),
+        metadata=st.dictionaries(
+            st.text(min_size=1, max_size=10),
+            st.text(min_size=0, max_size=50),
+            max_size=5,
+        ),
+    )
+
+
+class TestHypothesisStreamRoundTrip:
+    """Property-based round-trip and corruption detection."""
+
+    @given(stream=_stream_strategy())
+    @settings(max_examples=1000, deadline=None)
+    def test_roundtrip_identity(self, stream: EncodedStream) -> None:
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        assert recovered.version == stream.version
+        assert recovered.n_strands == stream.n_strands
+        assert recovered.sector == stream.sector
+        assert recovered.total_bytes == stream.total_bytes
+        assert recovered.checksum == stream.checksum
+        assert recovered.timestamp == stream.timestamp
+        assert recovered.metadata == stream.metadata
+        assert len(recovered.blocks) == len(stream.blocks)
+        for orig, rec in zip(stream.blocks, recovered.blocks, strict=True):
+            assert rec == orig
+
+    @given(stream=_stream_strategy(), flip_pos=st.data())
+    @settings(max_examples=1000, deadline=None)
+    def test_random_bit_flip_detected(
+        self, stream: EncodedStream, flip_pos: st.DataObject
+    ) -> None:
+        """A single random bit-flip in the wire bytes is always detected."""
+        wire = bytearray(stream.to_bytes())
+        idx = flip_pos.draw(st.integers(min_value=0, max_value=len(wire) - 1))
+        bit = flip_pos.draw(st.integers(min_value=0, max_value=7))
+        wire[idx] ^= 1 << bit
+        corrupted = bytes(wire)
+        with pytest.raises(
+            (MagicMismatchError, VersionError, DigestError, FormatError, Exception)
+        ):
+            EncodedStream.from_bytes(corrupted)
+
+    @given(block=_any_block_st)
+    @settings(max_examples=1000, deadline=None)
+    def test_block_dict_roundtrip(self, block: EncodedBlock) -> None:
+        d = block.to_dict()
+        recovered = EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+        assert recovered == block
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _recompute_digest(wire: bytearray) -> None:
+    """Recompute and overwrite the trailing BLAKE3 digest in-place."""
+    payload = bytes(wire[:-32])
+    digest = blake3.blake3(payload).digest()
+    wire[-32:] = digest
