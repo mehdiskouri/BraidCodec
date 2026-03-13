@@ -165,6 +165,9 @@ def keygen(
             (value,) = struct.unpack(">d", raw[:8])
             if math.isfinite(value):
                 theta_offset = value % _TWO_PI
+                # Clamp: floating-point modulo can yield exactly 2π
+                if theta_offset >= _TWO_PI:
+                    theta_offset = 0.0
                 break
 
     key_id = _compute_key_id(sector, n_strands, theta_offset)
