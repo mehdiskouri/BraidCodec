@@ -668,7 +668,7 @@ class TestPauliCompat:
     """Cover _pauli_compat.py branches directly."""
 
     def test_invalid_label(self):
-        with pytest.raises(Exception, match="(?i)pauli.*label|invalid"):
+        with pytest.raises(Exception, match=r"(?i)pauli.*label|invalid"):
             Pauli("ABC")
 
     def test_to_label(self):
