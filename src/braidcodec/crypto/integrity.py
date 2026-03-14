@@ -212,7 +212,7 @@ def _check_checksum(
     for block in sorted_blocks:
         try:
             chunk = generators_to_bytes(
-                block.generators,
+                block.effective_decode_generators,
                 block.n_strands,
                 block.original_length,
             )
