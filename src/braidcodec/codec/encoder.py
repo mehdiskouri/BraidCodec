@@ -18,7 +18,6 @@ from braidcodec.algebra.braid_equations import (
     BraidEquation,
     contract_braid_tensor,
     jones_polynomial,
-    simplify_braid,
     writhe,
 )
 from braidcodec.codec.chunker import (
@@ -82,10 +81,8 @@ def _encode_block(
         trace_real = tr.real
         trace_imag = tr.imag
 
-    simplified = simplify_braid(braid)
-
     return EncodedBlock(
-        generators=simplified.generators,
+        generators=generators,
         n_strands=n_strands,
         sector=sector,
         writhe=w,
