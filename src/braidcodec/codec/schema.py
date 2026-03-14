@@ -65,6 +65,7 @@ class EncodedBlock:
     jones_imag: float | None = None
     trace_real: float | None = None
     trace_imag: float | None = None
+    decode_generators: list[int] | None = None
 
     # Fields that must appear in the dict representation.
     _REQUIRED_KEYS: ClassVar[frozenset[str]] = frozenset(
@@ -80,6 +81,14 @@ class EncodedBlock:
     )
 
     def __post_init__(self) -> None:
+        # Validate decode_generators if present.
+        dg = self.decode_generators
+        if dg is not None and not all(g != 0 and abs(g) < self.n_strands for g in dg):
+            raise FormatError(
+                "decode_generators values must be non-zero with |g| < n_strands",
+                n_strands=self.n_strands,
+            )
+
         tier = self.invariant_tier
         if tier not in {1, 2, 3}:
             raise FormatError(
@@ -128,6 +137,15 @@ class EncodedBlock:
     # ── Properties ────────────────────────────────────────────────────────
 
     @property
+    def effective_decode_generators(self) -> list[int]:
+        """Generators to use for byte recovery.
+
+        Returns ``decode_generators`` if present (compressed block),
+        otherwise falls back to ``generators``.
+        """
+        return self.decode_generators if self.decode_generators is not None else self.generators
+
+    @property
     def jones(self) -> complex | None:
         """Jones polynomial as a complex number, or ``None``."""
         if self.jones_real is not None and self.jones_imag is not None:
@@ -157,6 +175,7 @@ class EncodedBlock:
             "jones_imag": self.jones_imag,
             "trace_real": self.trace_real,
             "trace_imag": self.trace_imag,
+            "decode_generators": self.decode_generators,
         }
         return d
 
@@ -182,6 +201,7 @@ class EncodedBlock:
                 jones_imag=_opt_float(d.get("jones_imag")),
                 trace_real=_opt_float(d.get("trace_real")),
                 trace_imag=_opt_float(d.get("trace_imag")),
+                decode_generators=_opt_int_list(d.get("decode_generators")),
             )
         except FormatError:
             raise
@@ -352,3 +372,10 @@ def _opt_float(value: object) -> float | None:
     if value is None:
         return None
     return float(value)  # type: ignore[arg-type]
+
+
+def _opt_int_list(value: object) -> list[int] | None:
+    """Coerce to ``list[int]`` or return ``None``."""
+    if value is None:
+        return None
+    return [int(v) for v in value]  # type: ignore[attr-defined]

@@ -1,6 +1,7 @@
 """BraidCodec — Topological data codec using braid group equations."""
 
 from braidcodec._version import __version__
+from braidcodec.codec.compressor import compress
 from braidcodec.codec.decoder import decode
 from braidcodec.codec.encoder import encode
 from braidcodec.codec.schema import EncodedBlock, EncodedStream
@@ -13,6 +14,7 @@ __all__ = [
     "EncodedStream",
     "VerificationResult",
     "__version__",
+    "compress",
     "decode",
     "encode",
     "key_from_bytes",
