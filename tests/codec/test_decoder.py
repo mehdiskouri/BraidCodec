@@ -206,3 +206,18 @@ class TestDecodeAllSectors:
         data = b"Sector test data"
         stream = encode(data, key, generators_per_block=_K_SMALL)
         assert decode(stream, key) == data
+
+
+# ── Compressed block with decode_generators ───────────────────────────────
+
+
+class TestDecodeCompressedBlock:
+    def test_decode_with_decode_generators(self) -> None:
+        """Decoder uses decode_generators (original) for byte recovery."""
+        from braidcodec.codec.compressor import compress
+
+        key = _make_key()
+        data = b"Compressed decode"
+        stream = encode(data, key, generators_per_block=_K_SMALL)
+        compressed = compress(stream, key, level=2)
+        assert decode(compressed, key) == data

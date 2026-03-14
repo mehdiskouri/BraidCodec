@@ -170,7 +170,7 @@ def decode(
 
         # Inverse mapping: generators → bytes
         chunk = generators_to_bytes(
-            block.generators,
+            block.effective_decode_generators,
             block.n_strands,
             block.original_length,
         )

@@ -307,6 +307,58 @@ class TestEncodedBlockDictRoundTrip:
         recovered = EncodedBlock.from_dict(d)  # type: ignore[arg-type]
         assert recovered.generators == []
 
+    def test_decode_generators_roundtrip(self) -> None:
+        """decode_generators survives to_dict / from_dict."""
+        block = EncodedBlock(
+            generators=[2, 1],
+            n_strands=4,
+            sector="TSR",
+            writhe=2,
+            block_index=0,
+            original_length=5,
+            invariant_tier=1,
+            decode_generators=[1, 3, -1, 2],
+        )
+        d = block.to_dict()
+        assert d["decode_generators"] == [1, 3, -1, 2]
+        recovered = EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+        assert recovered.decode_generators == [1, 3, -1, 2]
+        assert recovered.effective_decode_generators == [1, 3, -1, 2]
+
+    def test_decode_generators_none_roundtrip(self) -> None:
+        """decode_generators=None round-trips correctly."""
+        d = _TIER1.to_dict()
+        assert d["decode_generators"] is None
+        recovered = EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+        assert recovered.decode_generators is None
+        assert recovered.effective_decode_generators == recovered.generators
+
+    def test_decode_generators_wire_format(self) -> None:
+        """Compressed block with decode_generators survives wire serialisation."""
+        block = EncodedBlock(
+            generators=[2, 1],
+            n_strands=4,
+            sector="TSR",
+            writhe=2,
+            block_index=0,
+            original_length=5,
+            invariant_tier=1,
+            decode_generators=[1, 3, -1, 2],
+        )
+        stream = EncodedStream(
+            blocks=(block,),
+            n_strands=4,
+            sector="TSR",
+            total_bytes=5,
+            checksum=blake3.blake3(b"dummy").digest(),
+            timestamp=1_000_000_000,
+        )
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
+        rb = recovered.blocks[0]
+        assert rb.decode_generators == [1, 3, -1, 2]
+        assert rb.effective_decode_generators == [1, 3, -1, 2]
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # EncodedStream round-trip tests
