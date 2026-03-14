@@ -146,9 +146,7 @@ class TestDecodeTampering:
         stream = encode(data, key, generators_per_block=_K_SMALL)
         block = stream.blocks[0]
         assert block.invariant_tier == 2
-        tampered = _tamper_block(
-            stream, 0, jones_real=99.0, jones_imag=99.0
-        )
+        tampered = _tamper_block(stream, 0, jones_real=99.0, jones_imag=99.0)
         with pytest.raises(JonesError, match="Jones mismatch"):
             decode(tampered, key)
 
@@ -159,9 +157,7 @@ class TestDecodeTampering:
         stream = encode(data, key, generators_per_block=_K_DEFAULT)
         block = stream.blocks[0]
         assert block.invariant_tier == 3
-        tampered = _tamper_block(
-            stream, 0, trace_real=99.0, trace_imag=99.0
-        )
+        tampered = _tamper_block(stream, 0, trace_real=99.0, trace_imag=99.0)
         with pytest.raises(TraceError, match="trace mismatch"):
             decode(tampered, key)
 

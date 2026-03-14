@@ -204,8 +204,7 @@ def _check_checksum(
     if structurally_failed:
         return (
             False,
-            "BLAKE3 checksum skipped: structurally invalid blocks "
-            f"{sorted(structurally_failed)}",
+            f"BLAKE3 checksum skipped: structurally invalid blocks {sorted(structurally_failed)}",
         )
 
     sorted_blocks = sorted(stream.blocks, key=lambda b: b.block_index)
