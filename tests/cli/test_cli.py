@@ -198,6 +198,19 @@ class TestVerify:
         assert result.exit_code == EXIT_OK
         assert "PASS" in result.output
 
+    def test_verify_verbose_wrong_key(
+        self, runner: CliRunner, encoded_file: Path, tmp_path: Path
+    ) -> None:
+        """Verbose verify with wrong key → shows details."""
+        wrong_key_path = tmp_path / "wrong2.key"
+        wrong_key = keygen(sector="Ising", n_strands=4)
+        wrong_key_path.write_bytes(key_to_bytes(wrong_key))
+        result = runner.invoke(
+            cli, ["-v", "verify", str(encoded_file), "--key", str(wrong_key_path)]
+        )
+        assert result.exit_code != EXIT_OK
+        assert "FAIL" in result.output
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # inspect
@@ -215,6 +228,13 @@ class TestInspect:
         result = runner.invoke(cli, ["-v", "inspect", str(encoded_file)])
         assert result.exit_code == EXIT_OK
         assert "block 0" in result.output
+
+    def test_inspect_corrupt_file(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Corrupt .brdc → exit FORMAT."""
+        bad = tmp_path / "bad.brdc"
+        bad.write_bytes(b"XXXX")
+        result = runner.invoke(cli, ["inspect", str(bad)])
+        assert result.exit_code == EXIT_FORMAT
 
 
 # ═════════════════════════════════════════════════════════════════════════

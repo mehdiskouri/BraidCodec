@@ -141,6 +141,28 @@ class TestKeySerialization:
         with pytest.raises(FormatError, match=r"50"):
             key_from_bytes(b"short")
 
+    def test_bad_version(self) -> None:
+        """Forge a key blob with an unsupported version number."""
+        import struct
+
+        import blake3 as _b3
+
+        header = struct.pack(">4sBBId", b"BRDK", 99, 1, 4, 1.0)
+        digest = _b3.blake3(header).digest()
+        with pytest.raises(FormatError, match=r"version"):
+            key_from_bytes(header + digest)
+
+    def test_bad_sector_enum(self) -> None:
+        """Forge a key blob with an unknown sector enum."""
+        import struct
+
+        import blake3 as _b3
+
+        header = struct.pack(">4sBBId", b"BRDK", 1, 255, 4, 1.0)
+        digest = _b3.blake3(header).digest()
+        with pytest.raises(FormatError, match=r"sector"):
+            key_from_bytes(header + digest)
+
 
 # ── Key ID determinism ────────────────────────────────────────────────────
 

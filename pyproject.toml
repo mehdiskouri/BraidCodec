@@ -79,7 +79,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --benchmark-disable --ignore=tests/benchmarks"
+# Run benchmarks explicitly: pytest tests/benchmarks/ --benchmark-enable -o 'python_files=bench_*.py'
 
 [tool.coverage.run]
 source = ["braidcodec"]

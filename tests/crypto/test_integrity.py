@@ -191,3 +191,64 @@ class TestVerifyAllSectors:
         stream = encode(b"Sector test", key, generators_per_block=_K_SMALL)
         result = verify(stream, key)
         assert result.valid is True
+
+
+# ── Edge-case coverage for per-channel functions ──────────────────────────
+
+
+class TestVerifyEdgeCases:
+    def test_tier2_missing_jones_value(self) -> None:
+        """Tier 2 block with jones=None → invariant check fails."""
+        from braidcodec.crypto.integrity import _check_invariant
+
+        key = _make_key()
+        stream = encode(b"\x01\x02", key, generators_per_block=_K_SMALL)
+        block = stream.blocks[0]
+        assert block.invariant_tier == 2
+        # Bypass __post_init__ by setting via object.__setattr__
+        bad_block = replace(block, jones_real=0.0, jones_imag=0.0)
+        object.__setattr__(bad_block, "jones_real", None)
+        object.__setattr__(bad_block, "jones_imag", None)
+        ok, msg = _check_invariant(bad_block, key.sector_params)
+        assert not ok
+        assert msg is not None and "Jones" in msg
+
+    def test_tier3_missing_trace_value(self) -> None:
+        """Tier 3 block with trace=None → invariant check fails."""
+        from braidcodec.crypto.integrity import _check_invariant
+
+        key = _make_key()
+        stream = encode(b"Hello, topology!", key, generators_per_block=_K_DEFAULT)
+        block = stream.blocks[0]
+        assert block.invariant_tier == 3
+        bad_block = replace(block, trace_real=0.0, trace_imag=0.0)
+        object.__setattr__(bad_block, "trace_real", None)
+        object.__setattr__(bad_block, "trace_imag", None)
+        ok, msg = _check_invariant(bad_block, key.sector_params)
+        assert not ok
+        assert msg is not None and "trace" in msg
+
+    def test_fermion_generator_exceeds_sites(self) -> None:
+        """Generator |g| > n_sites → fermion channel fails."""
+        key = _make_key(n_strands=3)
+        stream = encode(b"\x01", key, generators_per_block=_K_SMALL)
+        block = stream.blocks[0]
+        # Replace a generator with one that exceeds n_sites (n_strands - 1 = 2)
+        bad_gens = list(block.generators)
+        bad_gens[0] = 99  # way beyond n_sites
+        tampered = _tamper_block(stream, 0, generators=bad_gens)
+        result = verify(tampered, key, fermion_check=True)
+        # Structural check may catch this first, but fermion won't pass either
+        assert result.valid is False
+
+    def test_checksum_skipped_on_structural_fail(self) -> None:
+        """When structural fails → checksum channel skipped."""
+        key = _make_key()
+        stream = encode(b"\x01\x02", key, generators_per_block=_K_SMALL)
+        block = stream.blocks[0]
+        bad_gens = list(block.generators)
+        bad_gens[0] = key.n_strands
+        tampered = _tamper_block(stream, 0, generators=bad_gens)
+        result = verify(tampered, key)
+        assert result.checksum_passed is False
+        assert any("skipped" in d.lower() or "checksum" in d.lower() for d in result.details)
