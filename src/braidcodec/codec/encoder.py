@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 # ── Tier threshold ────────────────────────────────────────────────────────
 
-_TIER_2_MAX_GENERATORS: int = 24
+_TIER_2_MAX_GENERATORS: int = 12
 
 
 # ── Module-level block encoder (picklable for ProcessPoolExecutor) ────────
@@ -61,7 +61,6 @@ def _encode_block(
         _sector_params=sector_params,
     )
 
-    matrix = contract_braid_tensor(braid)
     w = writhe(braid)
 
     # Tier selection: Jones (expensive state-sum) for short braids only.
@@ -77,6 +76,7 @@ def _encode_block(
         jones_real = j.real
         jones_imag = j.imag
     else:
+        matrix = contract_braid_tensor(braid)
         tr = complex(np.trace(matrix))
         trace_real = tr.real
         trace_imag = tr.imag

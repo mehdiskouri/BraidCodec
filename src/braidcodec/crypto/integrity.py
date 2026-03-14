@@ -216,7 +216,7 @@ def _check_checksum(
                 block.n_strands,
                 block.original_length,
             )
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             return False, f"BLAKE3 checksum failed: cannot decode block {block.block_index}"
         chunks.append(chunk)
 
