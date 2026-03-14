@@ -34,6 +34,7 @@ dev = [
     "mypy>=1.19.1",
     "ruff>=0.15.6",
     "pre-commit>=4.5.1",
+    "click>=8.0",
 ]
 
 [project.scripts]
