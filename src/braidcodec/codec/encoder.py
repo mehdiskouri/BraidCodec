@@ -85,7 +85,7 @@ def _encode_block(
     simplified = simplify_braid(braid)
 
     return EncodedBlock(
-        generators=simplified.generators,
+        generators=generators,
         n_strands=n_strands,
         sector=sector,
         writhe=w,
