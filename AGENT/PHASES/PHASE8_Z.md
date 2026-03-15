@@ -39,6 +39,11 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 - `latent-residual-v3` path remains implemented, decode-compatible, and quality-gated for cases where segmented heterogeneous residual coding wins on payload size.
 - Added `nnz`-aware compact fitting signal path (coupling `nnz` threaded into predictor/codec scoring) and behavior-sensitive tests; corpus benchmark remained at the same measured ratio on this slice (`wire=64204`, `h5=82693`), indicating no immediate size gain from signal injection alone.
 - Diagnostic conclusion: primary remaining compaction limiter on this workload is payload representation overhead (JSON/base64 envelope) rather than residual predictor selection quality.
+- Implemented lower-overhead residual payload envelope (`base85` with backward-compatible `base64` decode fallback) for latent residual programs.
+- Post-envelope benchmark on the same subset/config improved materially with fidelity unchanged:
+	- Wire container: `60530` bytes (`-52.71%` vs input), improved from `64204`.
+	- HDF5 container: `79019` bytes (`-38.27%` vs input), improved from `82693`.
+	- Program remained `latent-residual-v2` (`codec=bz2-xor-v1`, `predictor=zero-v1`), `exact decode=true`, `verify.valid=true`.
 
 **Remaining non-binary parity gaps**
 - Full Julia parity is still pending: current compact replay is scenario-constrained (`repeat-text-v1`, `logs-seq-v1`, `json-linear-items-v1`, `json-literal-v1`) rather than a general latent-manifold projection for arbitrary Text/JSON/Logs.

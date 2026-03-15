@@ -43,3 +43,25 @@ def test_fit_reconstructive_program_accepts_nnz_signal() -> None:
     }
     payload = json.loads(fitted["reconstructive_program_payload"])
     assert isinstance(payload, dict)
+
+
+def test_fit_reconstructive_program_emits_base85_residual_payload() -> None:
+    text = "Non-periodic text that should use latent residual storage path." * 4
+    fitted = fit_reconstructive_program(
+        text,
+        domain_kind="text",
+        coupling_density=0.4,
+        coupling_spectral_radius=300.0,
+        coupling_nnz=1024,
+    )
+    payload = json.loads(fitted["reconstructive_program_payload"])
+
+    if fitted["reconstructive_program_type"] == "latent-residual-v2":
+        assert isinstance(payload.get("residual_b85"), str)
+        assert payload.get("residual_b85")
+    elif fitted["reconstructive_program_type"] == "latent-residual-v3":
+        segments = payload.get("segments", [])
+        assert isinstance(segments, list)
+        assert segments
+        assert isinstance(segments[0].get("residual_b85"), str)
+        assert segments[0].get("residual_b85")
