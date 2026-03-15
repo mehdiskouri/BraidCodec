@@ -29,11 +29,12 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 - Added `latent-residual-v1` compact replay fallback (zlib residual correction) for non-template text/json cases to preserve exactness without raw full-literal template replay.
 - Removed duplicated top-level `reconstructive_program_payload` serialization (payload remains authoritative inside `reconstructive_payload_v1`), reducing wire overhead significantly while keeping commitment/checksum gates.
 - Added deterministic fidelity bundle proxies in metadata: `fidelity_energy`, `fidelity_topology`, `fidelity_coherence`, `fidelity_bundle_v1`.
+- Upgraded compact residual program to `latent-residual-v2` with coupling-aware adaptive codec selection (`zlib`/`bz2`/`lzma`) and deterministic spectral predictor support (decode remains backward-compatible with `latent-residual-v1`).
 
 **Observed impact snapshot (NeelNanda/pile-10k subset, ~20k tokens, 128006 input bytes)**
-- `program_type=latent-residual-v1`, bitwise exact decode + `verify.valid=True`.
-- Wire container: `71802` bytes (`-43.91%` vs input).
-- HDF5 container: `90266` bytes (`-29.48%` vs input).
+- `program_type=latent-residual-v2`, bitwise exact decode + `verify.valid=True`.
+- Wire container: `64204` bytes (`-49.84%` vs input).
+- HDF5 container: `82693` bytes (`-35.40%` vs input).
 
 **Remaining non-binary parity gaps**
 - Full Julia parity is still pending: current compact replay is scenario-constrained (`repeat-text-v1`, `logs-seq-v1`, `json-linear-items-v1`, `json-literal-v1`) rather than a general latent-manifold projection for arbitrary Text/JSON/Logs.
