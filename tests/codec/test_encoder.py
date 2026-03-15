@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import blake3
 import numpy as np
 import pytest
@@ -13,8 +15,13 @@ from braidcodec.algebra.braid_equations import (
     writhe,
 )
 from braidcodec.codec.chunker import bytes_to_generators, compute_block_size
-from braidcodec.codec.encoder import encode
-from braidcodec.codec.schema import EncodedStream
+from braidcodec.codec.encoder import _build_layer_aware_batches, encode
+from braidcodec.codec.schema import (
+    EncodedStream,
+    parse_reconstructive_payload_metadata,
+    validate_reconstructive_metadata,
+)
+from braidcodec.codec.tokenizer_frequency import FrequencyTokenizerV1
 from braidcodec.crypto.keys import BraidKey, keygen
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -44,7 +51,7 @@ class TestEncodeBasic:
         assert stream.total_bytes == 5
         assert stream.n_strands == key.n_strands
         assert stream.sector == key.sector
-        assert stream.version == 1
+        assert stream.version == 2
 
     def test_checksum_matches(self) -> None:
         data = b"Hello, World!"
@@ -64,7 +71,12 @@ class TestEncodeBasic:
         """Writhe is computed on the *original* generators (pre-simplification)."""
         key = _make_key()
         data = b"\x01\x02"
-        stream = encode(data, key, generators_per_block=_K_SMALL)
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="legacy",
+        )
         block = stream.blocks[0]
 
         # Independently compute writhe on original generators.
@@ -82,7 +94,12 @@ class TestJonesCorrectness:
     def test_jones_matches_independent_computation(self) -> None:
         key = _make_key()
         data = b"\x01\x02"
-        stream = encode(data, key, generators_per_block=_K_SMALL)
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="legacy",
+        )
         block = stream.blocks[0]
         assert block.invariant_tier == 2
 
@@ -109,7 +126,12 @@ class TestTraceCorrectness:
     def test_trace_matches_independent_computation(self) -> None:
         key = _make_key()
         data = b"Hello"
-        stream = encode(data, key, generators_per_block=_K_DEFAULT)
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_DEFAULT,
+            preprocessing_mode="legacy",
+        )
         block = stream.blocks[0]
         assert block.invariant_tier == 3
 
@@ -218,3 +240,261 @@ class TestEncodeParallelism:
         key = _make_key()
         stream = encode(b"Hello", key, generators_per_block=_K_SMALL, max_workers=1)
         assert isinstance(stream, EncodedStream)
+
+
+# ── Preprocessing modes ──────────────────────────────────────────────────
+
+
+class TestEncodePreprocessingModes:
+    def test_default_mode_matches_explicit_topology(self) -> None:
+        key = _make_key()
+        data = b"Topology default mode parity"
+
+        implicit = encode(data, key, generators_per_block=_K_DEFAULT)
+        explicit = encode(
+            data,
+            key,
+            generators_per_block=_K_DEFAULT,
+            preprocessing_mode="topology",
+        )
+
+        assert len(implicit.blocks) == len(explicit.blocks)
+        for a, b in zip(implicit.blocks, explicit.blocks, strict=True):
+            assert a.block_index == b.block_index
+            assert a.generators == b.generators
+            assert a.writhe == b.writhe
+            assert a.invariant_tier == b.invariant_tier
+
+    def test_legacy_mode_compatibility(self) -> None:
+        key = _make_key()
+        data = b"Legacy fallback compatibility" * 4
+
+        topology = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="topology",
+        )
+        legacy = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="legacy",
+        )
+
+        assert len(topology.blocks) == len(legacy.blocks)
+        assert [b.block_index for b in topology.blocks] == [
+            b.block_index for b in legacy.blocks
+        ]
+        for tb, lb in zip(topology.blocks, legacy.blocks, strict=True):
+            assert tb.generators != lb.generators
+            assert tb.decode_generators is None
+            assert tb.invariant_tier == lb.invariant_tier
+
+    def test_invalid_preprocessing_mode_raises(self) -> None:
+        key = _make_key()
+        with pytest.raises(ValueError, match="preprocessing_mode"):
+            encode(b"bad", key, preprocessing_mode="unknown")
+
+    def test_reconstructive_mode_emits_contract_metadata(self) -> None:
+        key = _make_key()
+        data = b'{"msg":"hello","x":1}'
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+        )
+        assert stream.metadata["preprocessing_mode"] == "reconstructive"
+        validate_reconstructive_metadata(stream.metadata)
+        payload = parse_reconstructive_payload_metadata(stream.metadata)
+        assert payload["model_id"] == "frequency-manifold"
+        assert payload["model_version"] == "1"
+        assert "reconstructive_commitment" in stream.metadata
+        assert float(stream.metadata["km_residual_max"]) >= 0.0
+        assert float(stream.metadata["km_valid_ratio"]) >= 0.0
+
+    def test_reconstructive_mode_roundtrip_compatibility(self) -> None:
+        key = _make_key()
+        data = "Cafe\u0301\nlog line".encode()
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+        # Reconstructive route now applies an invertible payload-seeded transform.
+        from braidcodec.codec.decoder import decode
+
+        assert decode(stream, key, verify=False) == data
+
+    def test_reconstructive_mode_uses_compact_no_block_payload(self) -> None:
+        key = _make_key()
+        data = ("Cafe\u0301\nlog line\n" * 10).encode("utf-8")
+        reconstructive = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+
+        assert len(reconstructive.blocks) == 0
+        assert reconstructive.metadata["execution_mode"] == "reconstructive-compact"
+
+    def test_reconstructive_mode_rejects_non_utf8(self) -> None:
+        key = _make_key()
+        with pytest.raises(ValueError, match="UTF-8"):
+            encode(
+                b"\xff\xfe\xfd",
+                key,
+                generators_per_block=_K_SMALL,
+                preprocessing_mode="reconstructive",
+            )
+
+    def test_reconstructive_mode_accepts_pretokenized_input(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        key = _make_key()
+        data = ("Cafe\u0301\nlog line\n" * 5).encode("utf-8")
+
+        tokenizer = FrequencyTokenizerV1()
+        tokenized = tokenizer.tokenize(data, domain="text")
+
+        def _fail_tokenize(
+            _self: FrequencyTokenizerV1,
+            _raw: object,
+            *,
+            _domain: str,
+        ) -> object:
+            raise AssertionError("tokenize should not be called when tokenization is provided")
+
+        monkeypatch.setattr(FrequencyTokenizerV1, "tokenize", _fail_tokenize)
+
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_tokenization=tokenized,
+        )
+
+        assert stream.metadata["execution_mode"] == "reconstructive-compact"
+        from braidcodec.codec.decoder import decode
+
+        assert decode(stream, key, verify=False) == data
+
+    def test_reconstructive_mode_domain_mismatch_raises(self) -> None:
+        key = _make_key()
+        data = b'{"items":[{"x":0,"y":0}]}'
+        tokenized = FrequencyTokenizerV1().tokenize(data, domain="json")
+
+        with pytest.raises(ValueError, match="does not match"):
+            encode(
+                data,
+                key,
+                generators_per_block=_K_SMALL,
+                preprocessing_mode="reconstructive",
+                reconstructive_domain="text",
+                reconstructive_tokenization=tokenized,
+            )
+
+    def test_reconstructive_mode_emits_fidelity_bundle(self) -> None:
+        key = _make_key()
+        data = ("Cafe\u0301\nlog line\n" * 3).encode("utf-8")
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+
+        assert "fidelity_energy" in stream.metadata
+        assert "fidelity_topology" in stream.metadata
+        assert "fidelity_coherence" in stream.metadata
+        assert "fidelity_bundle_v1" in stream.metadata
+
+    def test_reconstructive_mode_uses_latent_residual_for_nonrepeating_text(self) -> None:
+        key = _make_key()
+        data = b"This text is not a strict periodic repeat block for compact replay."
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+        payload = parse_reconstructive_payload_metadata(stream.metadata)
+        assert payload["reconstructive_program_type"] == "latent-residual-v1"
+        program_payload = json.loads(payload["reconstructive_program_payload"])
+        assert program_payload["predictor"] in {"zero-v1", "prev-byte-v1"}
+
+    def test_reconstructive_mode_keeps_repeat_program_for_periodic_text(self) -> None:
+        key = _make_key()
+        data = ("abc\n" * 20).encode("utf-8")
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+        payload = parse_reconstructive_payload_metadata(stream.metadata)
+        assert payload["reconstructive_program_type"] == "repeat-text-v1"
+
+    def test_metadata_contains_phase5_telemetry(self) -> None:
+        key = _make_key()
+        stream = encode(b"A" * 64, key, generators_per_block=_K_DEFAULT)
+        assert stream.metadata["preprocessing_mode"] == "topology"
+        assert stream.metadata["execution_mode"] in {"serial", "thread", "process"}
+        assert int(stream.metadata["task_count"]) >= 1
+        assert int(stream.metadata["batch_count"]) >= 1
+        assert int(stream.metadata["batch_size"]) >= 1
+        assert float(stream.metadata["estimated_cost_mean"]) >= 0.0
+        assert float(stream.metadata["timing_preprocess_s"]) >= 0.0
+        assert float(stream.metadata["timing_layer_order_s"]) >= 0.0
+        assert float(stream.metadata["timing_encode_core_s"]) >= 0.0
+        assert float(stream.metadata["timing_total_s"]) >= 0.0
+
+    def test_topology_mode_avoids_decode_generator_duplication(self) -> None:
+        key = _make_key()
+        stream = encode(b"topology payload" * 2, key, generators_per_block=_K_SMALL)
+        assert all(b.decode_generators is None for b in stream.blocks)
+        assert all(b.topology_morton_key is not None for b in stream.blocks)
+        assert all(b.topology_commitment is not None for b in stream.blocks)
+
+
+class TestLayerAwareBatching:
+    def test_batches_preserve_layer_boundaries(self) -> None:
+        dummy = (
+            b"x",
+            4,
+            "TSR",
+            None,
+            8,
+            0,
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        tasks = [
+            (0, dummy),
+            (0, dummy),
+            (1, dummy),
+            (1, dummy),
+            (2, dummy),
+        ]
+        batches = _build_layer_aware_batches(tasks, batch_size=2)
+        # Expect layer-aligned grouping with no cross-layer mixed batch.
+        assert len(batches) == 3
+        assert all(len(batch) <= 2 for batch in batches)

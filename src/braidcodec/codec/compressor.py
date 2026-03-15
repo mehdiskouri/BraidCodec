@@ -27,6 +27,7 @@ from braidcodec.algebra.braid_equations import (
     writhe,
 )
 from braidcodec.algebra.yang_baxter import verify_yang_baxter_morphism
+from braidcodec.codec.preprocessing import recover_legacy_generators, recover_legacy_generators_v2
 
 if TYPE_CHECKING:
     from braidcodec.codec.schema import EncodedStream
@@ -266,6 +267,7 @@ def compress(
     from braidcodec.codec.schema import EncodedBlock
 
     sector_params = key.sector_params
+    mode = stream.metadata.get("preprocessing_mode")
     new_blocks: list[EncodedBlock] = []
 
     for block in stream.blocks:
@@ -307,6 +309,45 @@ def compress(
             trace_real = tr.real
             trace_imag = tr.imag
 
+        decode_generators = block.effective_decode_generators
+        synthesis_version = stream.metadata.get("topology_synthesis_version", "1")
+        if mode == "topology" and block.decode_generators is None:
+            if (
+                synthesis_version == "2"
+                and block.topology_layer_index is not None
+                and block.topology_hash32 is not None
+                and block.topology_morton_key is not None
+            ):
+                decode_generators = recover_legacy_generators_v2(
+                    topology_generators=block.generators,
+                    n_strands=block.n_strands,
+                    layer_index=block.topology_layer_index,
+                    signature_hash32=block.topology_hash32,
+                    morton_key=block.topology_morton_key,
+                )
+            elif (
+                block.topology_layer_index is not None
+                and block.topology_layer_n_chunks is not None
+                and block.topology_nnz_bits is not None
+                and block.topology_dt_scale is not None
+                and block.topology_hash32 is not None
+                and block.topology_density_fp is not None
+                and block.topology_centroid_fp is not None
+                and block.topology_variance_fp is not None
+            ):
+                decode_generators = recover_legacy_generators(
+                    topology_generators=block.generators,
+                    n_strands=block.n_strands,
+                    layer_index=block.topology_layer_index,
+                    layer_n_chunks=block.topology_layer_n_chunks,
+                    nnz_bits=block.topology_nnz_bits,
+                    dt_scale=block.topology_dt_scale,
+                    signature_hash32=block.topology_hash32,
+                    signature_density_fp=block.topology_density_fp,
+                    signature_centroid_fp=block.topology_centroid_fp,
+                    signature_variance_fp=block.topology_variance_fp,
+                )
+
         new_block = EncodedBlock(
             generators=compressed.generators,
             n_strands=block.n_strands,
@@ -319,7 +360,7 @@ def compress(
             jones_imag=jones_imag,
             trace_real=trace_real,
             trace_imag=trace_imag,
-            decode_generators=block.effective_decode_generators,
+            decode_generators=decode_generators,
         )
         new_blocks.append(new_block)
 

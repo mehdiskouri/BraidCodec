@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,6 +14,7 @@ from braidcodec.cli.main import (
     EXIT_OK,
     cli,
 )
+from braidcodec.codec.schema import EncodedStream, compute_reconstructive_commitment
 from braidcodec.crypto.keys import key_from_bytes, key_to_bytes, keygen
 
 if TYPE_CHECKING:
@@ -52,6 +54,40 @@ def encoded_file(key_file: Path, sample_file: Path, tmp_path: Path, runner: CliR
     return out
 
 
+def _tamper_reconstructive_payload_contraction(path: Path) -> None:
+    """Mutate reconstructive payload K_M params so contraction fails."""
+    raw = path.read_bytes()
+    if raw[:8] == b"\x89HDF\r\n\x1a\n" or path.suffix.lower() in {".h5", ".hdf5"}:
+        stream = EncodedStream.from_hdf5_bytes(raw)
+        is_hdf5 = True
+    else:
+        stream = EncodedStream.from_bytes(raw)
+        is_hdf5 = False
+    meta = dict(stream.metadata)
+    payload_obj = json.loads(meta["reconstructive_payload_v1"])
+    payload_obj["km_kappa"] = "0.8"
+    payload_obj["km_eta"] = "0.4"
+    payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
+    meta["km_kappa"] = "0.8"
+    meta["km_eta"] = "0.4"
+    meta["reconstructive_payload_v1"] = payload
+    meta["reconstructive_commitment"] = compute_reconstructive_commitment(payload, stream.blocks)
+    tampered = EncodedStream(
+        blocks=stream.blocks,
+        n_strands=stream.n_strands,
+        sector=stream.sector,
+        total_bytes=stream.total_bytes,
+        checksum=stream.checksum,
+        version=stream.version,
+        timestamp=stream.timestamp,
+        metadata=meta,
+    )
+    if is_hdf5:
+        path.write_bytes(tampered.to_hdf5_bytes())
+    else:
+        path.write_bytes(tampered.to_bytes())
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # Top-level group
 # ═════════════════════════════════════════════════════════════════════════
@@ -61,7 +97,48 @@ class TestCliGroup:
     def test_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == EXIT_OK
-        assert "BraidCodec" in result.output
+
+    def test_encode_decode_hdf5_extension(self, runner: CliRunner, tmp_path: Path) -> None:
+        pytest.importorskip("h5py")
+        in_file = tmp_path / "input.bin"
+        in_file.write_bytes(b"hdf5 container path" * 4)
+
+        key_file = tmp_path / "k.key"
+        out_file = tmp_path / "out.h5"
+        dec_file = tmp_path / "decoded.bin"
+
+        r_key = runner.invoke(cli, ["keygen", "-o", str(key_file)])
+        assert r_key.exit_code == EXIT_OK
+
+        r_enc = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(in_file),
+                "-o",
+                str(out_file),
+                "--key",
+                str(key_file),
+            ],
+        )
+        assert r_enc.exit_code == EXIT_OK
+
+        magic = out_file.read_bytes()[:8]
+        assert magic == b"\x89HDF\r\n\x1a\n"
+
+        r_dec = runner.invoke(
+            cli,
+            [
+                "decode",
+                str(out_file),
+                "-o",
+                str(dec_file),
+                "--key",
+                str(key_file),
+            ],
+        )
+        assert r_dec.exit_code == EXIT_OK
+        assert dec_file.read_bytes() == in_file.read_bytes()
 
     def test_verbose_quiet_conflict(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--verbose", "--quiet", "keygen", "-o", "/dev/null"])
@@ -146,6 +223,79 @@ class TestEncode:
         assert result.exit_code == EXIT_OK
         assert out.exists()
 
+    def test_encode_reconstructive_with_domain(
+        self, runner: CliRunner, key_file: Path, sample_file: Path, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "enc_reconstructive.h5"
+        result = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(sample_file),
+                "-o",
+                str(out),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+                "--container",
+                "hdf5",
+            ],
+        )
+        assert result.exit_code == EXIT_OK
+        assert out.exists()
+        assert out.read_bytes()[:8] == b"\x89HDF\r\n\x1a\n"
+
+    def test_encode_reconstructive_auto_uses_wire_for_brdc_suffix(
+        self, runner: CliRunner, key_file: Path, sample_file: Path, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "enc_reconstructive.brdc"
+        result = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(sample_file),
+                "-o",
+                str(out),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+            ],
+        )
+        assert result.exit_code == EXIT_OK
+        assert out.exists()
+        assert out.read_bytes()[:8] != b"\x89HDF\r\n\x1a\n"
+
+    def test_encode_reconstructive_forced_hdf5_ignores_suffix(
+        self, runner: CliRunner, key_file: Path, sample_file: Path, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "enc_reconstructive.brdc"
+        result = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(sample_file),
+                "-o",
+                str(out),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+                "--container",
+                "hdf5",
+            ],
+        )
+        assert result.exit_code == EXIT_OK
+        assert out.exists()
+        assert out.read_bytes()[:8] == b"\x89HDF\r\n\x1a\n"
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # decode
@@ -173,6 +323,33 @@ class TestDecode:
         )
         assert result.exit_code == EXIT_KEY_MISMATCH
 
+    def test_decode_failure_taxonomy_reconstructive_contraction(
+        self, runner: CliRunner, key_file: Path, sample_file: Path, tmp_path: Path
+    ) -> None:
+        enc = tmp_path / "r2.h5"
+        out = tmp_path / "out.bin"
+        r = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(sample_file),
+                "-o",
+                str(enc),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+            ],
+        )
+        assert r.exit_code == EXIT_OK
+
+        _tamper_reconstructive_payload_contraction(enc)
+        dr = runner.invoke(cli, ["decode", str(enc), "-o", str(out), "--key", str(key_file)])
+        assert dr.exit_code != EXIT_OK
+        assert "Failure category:" in dr.output
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # verify
@@ -197,6 +374,44 @@ class TestVerify:
         result = runner.invoke(cli, ["-v", "verify", str(encoded_file), "--key", str(key_file)])
         assert result.exit_code == EXIT_OK
         assert "PASS" in result.output
+
+    def test_verify_diagnostics_flag(
+        self,
+        runner: CliRunner,
+        key_file: Path,
+        encoded_file: Path,
+    ) -> None:
+        result = runner.invoke(
+            cli,
+            ["verify", str(encoded_file), "--key", str(key_file), "--diagnostics"],
+        )
+        assert result.exit_code == EXIT_OK
+
+    def test_verify_failure_taxonomy_reconstructive_contraction(
+        self, runner: CliRunner, key_file: Path, sample_file: Path, tmp_path: Path
+    ) -> None:
+        enc = tmp_path / "r.h5"
+        r = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(sample_file),
+                "-o",
+                str(enc),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+            ],
+        )
+        assert r.exit_code == EXIT_OK
+
+        _tamper_reconstructive_payload_contraction(enc)
+        vr = runner.invoke(cli, ["verify", str(enc), "--key", str(key_file)])
+        assert vr.exit_code != EXIT_OK
+        assert "Failure category:" in vr.output
 
     def test_verify_verbose_wrong_key(
         self, runner: CliRunner, encoded_file: Path, tmp_path: Path

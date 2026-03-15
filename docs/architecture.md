@@ -12,13 +12,14 @@ flowchart TB
 
     subgraph L2[Crypto Layer]
         K[keys.py — keygen, serialize]
-        INT[integrity.py — 5-channel verify]
+        INT[integrity.py — 5+1 channel verify]
     end
 
     subgraph L1[Codec Layer]
         ENC[encoder.py — data → stream]
         DEC[decoder.py — stream → data]
         CHK[chunker.py — bytes ↔ generators]
+        PRE[preprocessing.py — BFPS/layers/Morton]
         CMP[compressor.py — Level 0-2]
         SCH[schema.py — wire format]
     end
@@ -32,7 +33,7 @@ flowchart TB
 
     CLI --> K & INT & ENC & DEC & CMP
     INT --> BE & FB
-    ENC --> CHK & BE & SCH & K
+    ENC --> CHK & PRE & BE & SCH & K
     DEC --> CHK & BE & SCH
     CMP --> BE & YB
     CHK --> TSR
@@ -43,7 +44,8 @@ flowchart TB
 ```mermaid
 flowchart LR
     A[bytes] --> B[chunk into byte-chunks]
-    B --> C[mixed-radix → generator seqs]
+    B --> P[BFPS + sparse layers + Morton key]
+    P --> C[topology-conditioned generator synthesis]
     C --> D[build BraidEquation per block]
     D --> E[compute invariants per tier]
     E --> F[pack into EncodedBlock]
@@ -52,7 +54,7 @@ flowchart LR
     H --> I[msgpack → wire bytes]
 ```
 
-1. **Chunking**: Input bytes are split into fixed-size chunks determined by `generators_per_block` and `n_strands`. Each chunk maps bijectively to a generator sequence via mixed-radix encoding.
+1. **Chunking + preprocessing**: Input bytes are split into fixed-size chunks determined by `generators_per_block` and `n_strands`. In topology mode, each chunk gets deterministic BFPS features, sparse-layer placement, and a Morton key.
 
 2. **Braid construction**: Each generator sequence becomes a `BraidEquation` with the key's sector parameters.
 
@@ -73,6 +75,46 @@ flowchart LR
     G --> H[original bytes]
 ```
 
+## Reconstructive Contract (Phase A)
+
+The reconstructive mode is a deterministic pipeline contract:
+
+`tokenize -> normalize -> manifold-fit -> K_M solve -> project -> bytes -> verify`
+
+Hard failure gates:
+
+- `L < 1` contraction precondition must hold.
+- K_M iteration must converge within configured bounds.
+- Topology/coherence checks must pass.
+- Final BLAKE3 checksum over reconstructed bytes must match.
+
+If any gate fails, decode must fail closed.
+
+## Frequency Tokenizer v1 (Phase B)
+
+Tokenizer defaults for reconstructive mode:
+
+- `tokenizer_id = frequency-tokenizer`
+- `tokenizer_version = v1`
+- `bin_count = 128`
+- Versioned frequency-bin table with stable `bin_table_hash`
+
+Canonicalization rules:
+
+- `Text`: UTF-8 decoding, Unicode NFC normalization, LF newlines.
+- `JSON`: canonical key ordering and stable compact formatting.
+- `Logs`: UTF-8 + newline normalization with deterministic token splitting.
+
+Required reconstructive metadata keys:
+
+- `tokenizer_id`
+- `tokenizer_version`
+- `domain_kind` (`text`, `json`, or `logs`)
+- `bin_count`
+- `bin_table_hash`
+- `vocab_hash`
+- `normalization_profile_id`
+
 ## Compression
 
 Three levels of topological compression, each preserving the braid's equivalence class:
@@ -87,7 +129,7 @@ Compressed blocks store both shortened generators and `decode_generators` (the o
 
 ## Integrity Verification
 
-Five independent channels, any of which can detect tampering:
+Five plus one independent channels, any of which can detect tampering:
 
 | Channel | What it checks | Cost |
 |---------|---------------|------|
@@ -95,6 +137,7 @@ Five independent channels, any of which can detect tampering:
 | Writhe | Sum of generator signs per block | $O(k)$ |
 | Invariant | Jones polynomial or matrix trace | $O(2^k)$ or $O(k \cdot 4^n)$ |
 | Fermion | Occupation constraints (optional) | $O(k \cdot n)$ |
+| Topology | Recompute BFPS/layer/Morton/commitment (optional) | $O(\text{blocks})$ |
 | Checksum | BLAKE3 over reconstructed bytes | $O(\text{data size})$ |
 
 ## Performance Characteristics
@@ -113,16 +156,20 @@ Estimates assume serial encoding with Jones polynomial on a single core. Paralle
 
 ```
 BRDC (4 bytes magic)
-version (1 byte)
+version (2 bytes)
 msgpack payload:
   ├── sector (string)
   ├── n_strands (int)
-  ├── theta_offset (float64)
-  ├── generators_per_block (int)
-  ├── invariant_tier (int)
+    ├── total_bytes (int)
+    ├── checksum (32 bytes BLAKE3)
+    ├── timestamp (int64)
+    ├── metadata (dict)
   ├── blocks: [
-  │     { generators, writhe, jones, trace,
-  │       fermion_parity, decode_generators }
+    │     { generators, writhe, jones_real/jones_imag,
+    │       trace_real/trace_imag, decode_generators,
+    │       topology_layer_index/layer_n_chunks/nnz_bits,
+    │       topology_hash32/density_fp/centroid_fp/variance_fp,
+    │       topology_morton_key/topology_commitment }
   │   ]
-  └── checksum (32 bytes BLAKE3)
+    └── trailing digest over payload
 ```

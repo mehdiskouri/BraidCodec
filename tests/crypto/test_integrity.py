@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ import blake3
 import pytest
 
 from braidcodec.codec.encoder import encode
+from braidcodec.codec.schema import compute_reconstructive_commitment
 from braidcodec.crypto.integrity import VerificationResult, verify
 from braidcodec.crypto.keys import BraidKey, keygen
 
@@ -54,12 +56,32 @@ class TestVerifyClean:
         stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
         result = verify(stream, key)
         assert result.fermion_passed is None
+        assert result.topology_passed is None
 
     def test_fermion_enabled_passes_clean(self) -> None:
         key = _make_key()
         stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
         result = verify(stream, key, fermion_check=True)
         assert result.fermion_passed is True
+        assert result.valid is True
+
+    def test_topology_enabled_passes_clean(self) -> None:
+        key = _make_key()
+        stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
+        result = verify(stream, key, topology_check=True)
+        assert result.topology_passed is True
+        assert result.valid is True
+
+    def test_topology_skips_legacy_mode(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"Hello",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="legacy",
+        )
+        result = verify(stream, key, topology_check=True)
+        assert result.topology_passed is None
         assert result.valid is True
 
     def test_tier_3_clean(self) -> None:
@@ -144,6 +166,91 @@ class TestVerifyCorruption:
         result = verify(tampered, key)
         assert result.checksum_passed is False
         assert result.valid is False
+
+    def test_topology_corruption(self) -> None:
+        """Modified topology metadata fails topology channel only when enabled."""
+        key = _make_key()
+        stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
+        tampered = _tamper_block(stream, 0, topology_hash32=0)
+
+        result_no_topo = verify(tampered, key, topology_check=False)
+        assert result_no_topo.topology_passed is None
+
+        result_topo = verify(tampered, key, topology_check=True)
+        assert result_topo.topology_passed is False
+        assert result_topo.valid is False
+
+    def test_topology_morton_commitment_corruption(self) -> None:
+        key = _make_key()
+        stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
+        tampered = _tamper_block(stream, 0, topology_morton_key=0, topology_commitment=0)
+        result_topo = verify(tampered, key, topology_check=True)
+        assert result_topo.topology_passed is False
+        assert result_topo.valid is False
+
+    def test_reconstructive_metadata_corruption(self) -> None:
+        """Missing reconstructive metadata key fails structural validation."""
+        key = _make_key()
+        stream = encode(
+            b"Hello reconstructive",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta.pop("vocab_hash", None)
+        tampered = replace(stream, metadata=bad_meta)
+
+        result = verify(tampered, key)
+        assert result.structural_passed is False
+        assert result.valid is False
+        assert any("Reconstructive metadata invalid" in d for d in result.details)
+
+    def test_reconstructive_commitment_corruption(self) -> None:
+        """Corrupted reconstructive commitment fails structural validation."""
+        key = _make_key()
+        stream = encode(
+            b"Hello reconstructive",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta["reconstructive_commitment"] = "0" * 64
+        tampered = replace(stream, metadata=bad_meta)
+
+        result = verify(tampered, key)
+        assert result.structural_passed is False
+        assert result.valid is False
+        assert any("Reconstructive metadata invalid" in d for d in result.details)
+
+    def test_reconstructive_solver_gate_corruption(self) -> None:
+        """Corrupted K_M parameters fail reconstructive structural gate."""
+        key = _make_key()
+        stream = encode(
+            b"Hello reconstructive",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+        )
+        bad_meta = dict(stream.metadata)
+        payload_obj = json.loads(bad_meta["reconstructive_payload_v1"])
+        payload_obj["km_kappa"] = "0.8"
+        payload_obj["km_eta"] = "0.4"
+        payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
+        bad_meta["km_kappa"] = "0.8"
+        bad_meta["km_eta"] = "0.4"
+        bad_meta["reconstructive_payload_v1"] = payload
+        bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
+            payload,
+            stream.blocks,
+        )
+        tampered = replace(stream, metadata=bad_meta)
+
+        result = verify(tampered, key)
+        assert result.structural_passed is False
+        assert result.valid is False
+        assert any("Reconstructive metadata invalid" in d for d in result.details)
 
 
 # ── Structural short-circuit ──────────────────────────────────────────────

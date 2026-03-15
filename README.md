@@ -20,7 +20,7 @@ flowchart LR
     G --> H[bytes]
 ```
 
-Data is split into chunks, mapped bijectively to braid generators via mixed-radix encoding, then assembled into `BraidEquation` objects with sector-parameterized R-matrices. Topological invariants (writhe, Jones polynomial, BLAKE3 checksum) are computed per block for integrity verification. The result is a self-verifying `.brdc` wire format.
+Data is split into chunks, profiled with deterministic topology signatures, transformed into topology-conditioned braid generators (while preserving decode bijection), then assembled into `BraidEquation` objects with sector-parameterized R-matrices. Topological invariants (writhe, Jones/trace tiers, BLAKE3 checksum) are computed per block for integrity verification. The result is a self-verifying `.brdc` wire format (`v2`, with `v1` read compatibility).
 
 ## Overview
 
@@ -28,7 +28,7 @@ BraidCodec unifies encryption, compression, and integrity verification into a si
 
 - **Confidentiality** comes from sector-parameterized R-matrices acting as trapdoor functions
 - **Compression** comes from topological equivalence class collapse (3 levels)
-- **Integrity** comes from 5-channel verification (structural, writhe, invariant, fermion, checksum)
+- **Integrity** comes from 5+1 channel verification (structural, writhe, invariant, fermion, topology, checksum)
 
 ## Installation
 
@@ -59,8 +59,8 @@ encoded = braidcodec.encode(b"Hello, topology!", key)
 decoded = braidcodec.decode(encoded, key)
 assert decoded == b"Hello, topology!"
 
-# Verify integrity
-result = braidcodec.verify(encoded, key)
+# Verify integrity (topology channel optional)
+result = braidcodec.verify(encoded, key, topology_check=True)
 assert result.valid
 ```
 
@@ -76,8 +76,8 @@ braidcodec encode data.bin -o data.brdc --key my.key
 # Decode a file
 braidcodec decode data.brdc -o restored.bin --key my.key
 
-# Verify integrity (5-channel)
-braidcodec verify data.brdc --key my.key
+# Verify integrity (topology channel optional)
+braidcodec verify data.brdc --key my.key --topology-check
 
 # Inspect stream metadata
 braidcodec inspect data.brdc
@@ -123,8 +123,8 @@ pip install -e ".[dev,cli]"
 # Run tests
 pytest tests/
 
-# Run benchmarks
-pytest tests/benchmarks/ --benchmark-enable
+# Run core benchmarks
+pytest tests/benchmarks/bench_core_throughput.py --benchmark-enable -o 'python_files=bench_*.py'
 
 # Lint & format
 ruff check src/ tests/ examples/

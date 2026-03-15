@@ -23,6 +23,7 @@ from braidcodec.codec.compressor import (
 )
 from braidcodec.codec.decoder import decode
 from braidcodec.codec.encoder import encode
+from braidcodec.codec.preprocessing import recover_legacy_generators_v2
 from braidcodec.crypto.keys import keygen
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -211,10 +212,27 @@ class TestCompressStream:
         data = b"Hello, topology!"
         stream = encode(data, key, generators_per_block=_K_SMALL)
         compressed = compress(stream, key, level=2)
+        synthesis_version = stream.metadata.get("topology_synthesis_version", "1")
         for orig_block, comp_block in zip(stream.blocks, compressed.blocks, strict=True):
             if len(comp_block.generators) < len(orig_block.generators):
                 assert comp_block.decode_generators is not None
-                assert comp_block.decode_generators == orig_block.generators
+                if (
+                    synthesis_version == "2"
+                    and stream.metadata.get("preprocessing_mode") == "topology"
+                    and orig_block.topology_layer_index is not None
+                    and orig_block.topology_hash32 is not None
+                    and orig_block.topology_morton_key is not None
+                ):
+                    expected = recover_legacy_generators_v2(
+                        topology_generators=orig_block.generators,
+                        n_strands=orig_block.n_strands,
+                        layer_index=orig_block.topology_layer_index,
+                        signature_hash32=orig_block.topology_hash32,
+                        morton_key=orig_block.topology_morton_key,
+                    )
+                    assert comp_block.decode_generators == expected
+                else:
+                    assert comp_block.decode_generators == orig_block.effective_decode_generators
 
     def test_ratio_lte_one(self) -> None:
         """Compression ratio ≤ 1.0 (compressed never larger than original)."""

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - Unreleased
 
+### In Progress
+
+#### Phase 8 — Topology-First Encoding v2
+- Default-on topology preprocessing path with explicit legacy fallback mode.
+- Stream schema bumped to `v2` with backward read compatibility for `v1` streams.
+- Topology metadata fields added per block:
+  - layer descriptors (`topology_layer_index`, `topology_layer_n_chunks`, `topology_nnz_bits`)
+  - BFPS terms (`topology_hash32`, `topology_density_fp`, `topology_centroid_fp`, `topology_variance_fp`)
+  - Morton/index binding (`topology_morton_key`)
+  - additive commitment (`topology_commitment`)
+- Encoder now applies deterministic topology-conditioned generator synthesis while preserving decode bijection through `decode_generators`.
+- Additive topology integrity verification channel (optional) integrated into `verify(...)` as a sixth channel alongside checksum authority.
+- Regime-aware execution policy (`serial` / `thread` / `process`) and layer-aware batching integrated for reduced scheduler/IPC overhead.
+- Stage telemetry added to stream metadata (`timing_preprocess_s`, `timing_layer_order_s`, `timing_encode_core_s`, `timing_total_s`).
+- New benchmark suites:
+  - `bench_core_throughput.py` for bounded CI throughput checks.
+  - `bench_stress_regime.py` for pathological combinations in reporting mode.
+- Benchmark CI split into core publishing + non-blocking stress reporting with threshold alert script (`scripts/check_stress_thresholds.py`).
+
+#### Remaining for Full Phase 8 Closeout
+- Add decode/verify-focused lightweight benchmark suite with explicit topology/legacy deltas.
+- Implement hard CI promotion gates (consecutive-pass counters and enforced go/no-go thresholds) once variance stabilizes across repeated runs.
+- Expand public docs and migration guidance with finalized performance deltas and tradeoff recommendations from stabilized CI history.
+- Final release-note pass for default behavior changes (`preprocessing_mode=topology`, 6-channel optional verify path).
+
 ### Added
 
 #### Phase 0 — Scaffold & Algebra Migration

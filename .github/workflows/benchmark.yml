@@ -20,18 +20,44 @@ jobs:
 
       - run: pip install -e ".[dev]"
 
-      - name: Run benchmarks
+      - name: Run core-throughput benchmarks
         run: >-
-          pytest tests/benchmarks/
-          --benchmark-json=bench.json
+          pytest tests/benchmarks/bench_core_throughput.py
+          --benchmark-json=bench_core.json
           --benchmark-enable
+          --benchmark-min-rounds=5
+          --benchmark-max-time=0.3
+          -o 'python_files=bench_*.py'
           -q
+
+      - name: Run stress-regime benchmarks (reporting)
+        continue-on-error: true
+        run: >-
+          pytest tests/benchmarks/bench_stress_regime.py
+          --benchmark-json=bench_stress.json
+          --benchmark-enable
+          --benchmark-min-rounds=1
+          --benchmark-max-time=0.15
+          -o 'python_files=bench_*.py'
+          -q
+
+      - name: Emit stress threshold alerts
+        if: always()
+        run: python scripts/check_stress_thresholds.py bench_stress.json
+
+      - name: Upload stress benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-regime-benchmarks
+          path: bench_stress.json
+          if-no-files-found: warn
 
       - name: Publish results
         uses: benchmark-action/github-action-benchmark@v1
         with:
           tool: pytest
-          output-file-path: bench.json
+          output-file-path: bench_core.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           benchmark-data-dir-path: benchmarks

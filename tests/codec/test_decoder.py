@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ import pytest
 
 from braidcodec._exceptions import (
     ChecksumError,
+    FormatError,
     JonesError,
     KeyMismatchError,
     TraceError,
@@ -17,6 +19,7 @@ from braidcodec._exceptions import (
 )
 from braidcodec.codec.decoder import decode
 from braidcodec.codec.encoder import encode
+from braidcodec.codec.schema import compute_reconstructive_commitment
 from braidcodec.crypto.keys import BraidKey, keygen
 
 if TYPE_CHECKING:
@@ -185,6 +188,127 @@ class TestDecodeVerifyFalse:
         # Should still succeed — writhe still matches, only Jones is wrong
         result = decode(tampered, key, verify=False)
         assert result == data
+
+
+class TestDecodeReconstructiveRoute:
+    def test_reconstructive_decode_supports_latent_residual_program(self) -> None:
+        key = _make_key()
+        data = b"Natural-language style payload with mixed punctuation and spacing."
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+        assert decode(stream, key, verify=False) == data
+
+    def test_reconstructive_decode_requires_compact_payload(self) -> None:
+        key = _make_key()
+        data = "Cafe\u0301\nlog line".encode()
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta.pop("reconstructive_payload_v1", None)
+        tampered = replace(stream, metadata=bad_meta)
+
+        with pytest.raises(FormatError, match="reconstructive_payload_v1"):
+            decode(tampered, key, verify=False)
+
+    def test_reconstructive_decode_rejects_invalid_payload_json(self) -> None:
+        key = _make_key()
+        data = b'{"msg":"hello","x":1}'
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="json",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta["reconstructive_payload_v1"] = "not-json"
+        tampered = replace(stream, metadata=bad_meta)
+
+        with pytest.raises(FormatError, match="JSON"):
+            decode(tampered, key, verify=False)
+
+    def test_reconstructive_decode_rejects_bad_commitment(self) -> None:
+        key = _make_key()
+        data = b'{"msg":"hello","x":1}'
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="json",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta["reconstructive_commitment"] = "0" * 64
+        tampered = replace(stream, metadata=bad_meta)
+
+        with pytest.raises(FormatError, match="commitment mismatch"):
+            decode(tampered, key, verify=False)
+
+    def test_reconstructive_decode_rejects_contraction_gate(self) -> None:
+        key = _make_key()
+        data = b'{"msg":"hello","x":1}'
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="json",
+        )
+        bad_meta = dict(stream.metadata)
+        payload_obj = json.loads(bad_meta["reconstructive_payload_v1"])
+        payload_obj["km_kappa"] = "0.8"
+        payload_obj["km_eta"] = "0.4"
+        payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
+        bad_meta["km_kappa"] = "0.8"
+        bad_meta["km_eta"] = "0.4"
+        bad_meta["reconstructive_payload_v1"] = payload
+        bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
+            payload,
+            stream.blocks,
+        )
+        tampered = replace(stream, metadata=bad_meta)
+
+        with pytest.raises(FormatError, match="contraction"):
+            decode(tampered, key, verify=False)
+
+    def test_reconstructive_decode_seed_tamper_breaks_reconstruction(self) -> None:
+        key = _make_key()
+        data = ("Cafe\u0301\nlog line\n" * 10).encode("utf-8")
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+        )
+        bad_meta = dict(stream.metadata)
+        payload_obj = json.loads(bad_meta["reconstructive_payload_v1"])
+        payload_obj["reconstructive_program_payload"] = json.dumps(
+            {"unit_b64": "QQ==", "repeat_count": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
+        bad_meta["reconstructive_program_payload"] = payload_obj["reconstructive_program_payload"]
+        bad_meta["reconstructive_payload_v1"] = payload
+        bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
+            payload,
+            stream.blocks,
+        )
+        tampered = replace(stream, metadata=bad_meta)
+
+        with pytest.raises(ChecksumError, match="checksum mismatch"):
+            decode(tampered, key, verify=False)
 
     def test_tampered_trace_ok_without_verify(self) -> None:
         """With verify=False, corrupted trace doesn't prevent decode."""

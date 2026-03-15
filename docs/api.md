@@ -65,6 +65,8 @@ def encode(
     *,
     generators_per_block: int = 32,
     max_workers: int | None = None,
+    preprocessing_mode: str = "topology",
+    reconstructive_domain: str | None = None,
 ) -> EncodedStream
 ```
 
@@ -76,6 +78,12 @@ Encode arbitrary bytes into a topological braid stream.
 | `key` | `BraidKey` from `keygen`. |
 | `generators_per_block` | Generators per block. Lower = faster (tier 1-2), higher = more compact. |
 | `max_workers` | Parallel encoding workers. `None` = auto (capped at 8). |
+| `preprocessing_mode` | `"topology"` (default), `"legacy"`, or experimental `"reconstructive"`. |
+| `reconstructive_domain` | Optional domain override for reconstructive mode: `"text"`, `"json"`, or `"logs"`. |
+
+Notes for `reconstructive` mode (current phase):
+- Deterministic tokenizer/normalization/manifold/K_M diagnostics are emitted in metadata.
+- Decode remains lossless through the existing generator channel while compact reconstructive payload wiring is in progress.
 
 **Returns**: `EncodedStream` with blocks, invariants, and checksum.
 
@@ -139,14 +147,16 @@ def verify(
     key: BraidKey,
     *,
     fermion_check: bool = False,
+    topology_check: bool = False,
 ) -> VerificationResult
 ```
 
-Run 5-channel integrity verification on an encoded stream.
+Run 5+1-channel integrity verification on an encoded stream.
 
 | Parameter | Description |
 |-----------|-------------|
 | `fermion_check` | Enable fermion occupation constraint checking (slower). |
+| `topology_check` | Enable topology metadata recomputation and commitment checks for topology-mode streams. |
 
 **Returns**: `VerificationResult` with per-channel pass/fail.
 
@@ -182,6 +192,16 @@ class EncodedBlock:
     trace_real: float | None = None    # Re(trace) — tier 3
     trace_imag: float | None = None    # Im(trace) — tier 3
     decode_generators: list[int] | None = None  # Original generators (if compressed)
+    topology_layer_index: int | None = None
+    topology_layer_n_chunks: int | None = None
+    topology_nnz_bits: int | None = None
+    topology_dt_scale: float | None = None
+    topology_hash32: int | None = None
+    topology_density_fp: int | None = None
+    topology_centroid_fp: int | None = None
+    topology_variance_fp: int | None = None
+    topology_morton_key: int | None = None
+    topology_commitment: int | None = None
 ```
 
 ### `EncodedStream`
@@ -194,7 +214,7 @@ class EncodedStream:
     sector: str
     total_bytes: int                 # Total original data length
     checksum: bytes                  # 32-byte BLAKE3 digest
-    version: int = 1
+    version: int = 2
     timestamp: int = ...             # time.time_ns()
     metadata: dict[str, str] = {}    # User-defined metadata
 ```
@@ -211,6 +231,7 @@ class VerificationResult:
     writhe_passed: bool        # Per-block writhe
     invariant_passed: bool     # Jones or trace
     fermion_passed: bool | None  # None if not checked
+    topology_passed: bool | None  # None if not checked
     checksum_passed: bool      # BLAKE3
     failed_blocks: tuple[int, ...]  # Indices of failing blocks
     details: tuple[str, ...]   # Human-readable channel summaries
@@ -252,9 +273,9 @@ Entry point: `braidcodec` (requires `pip install braidcodec[cli]`).
 | Command | Description | Exit codes |
 |---------|-------------|------------|
 | `braidcodec keygen -o KEY` | Generate key, write to file | 0, 4 |
-| `braidcodec encode INPUT -o OUTPUT --key KEY` | Encode file | 0, 3, 4 |
+| `braidcodec encode INPUT -o OUTPUT --key KEY --preprocessing-mode topology|legacy|reconstructive [--reconstructive-domain text|json|logs]` | Encode file | 0, 3, 4 |
 | `braidcodec decode INPUT -o OUTPUT --key KEY` | Decode file | 0, 1, 2, 3, 4 |
-| `braidcodec verify INPUT --key KEY` | Verify integrity | 0, 1, 2, 3, 4 |
+| `braidcodec verify INPUT --key KEY [--fermion-check] [--topology-check] [--diagnostics]` | Verify integrity | 0, 1, 2, 3, 4 |
 | `braidcodec inspect INPUT` | Show stream metadata | 0, 3, 4 |
 | `braidcodec benchmark` | Run encode/decode/verify timing | 0 |
 

@@ -38,7 +38,15 @@ from braidcodec._exceptions import (
     VersionError,
     WritheError,
 )
-from braidcodec.codec.schema import EncodedBlock, EncodedStream
+from braidcodec.codec.schema import (
+    EncodedBlock,
+    EncodedStream,
+    build_reconstructive_payload_metadata,
+    compute_reconstructive_commitment,
+    parse_reconstructive_payload_metadata,
+    validate_reconstructive_commitment_metadata,
+    validate_reconstructive_payload_metadata,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Exception hierarchy tests
@@ -359,6 +367,114 @@ class TestEncodedBlockDictRoundTrip:
         assert rb.decode_generators == [1, 3, -1, 2]
         assert rb.effective_decode_generators == [1, 3, -1, 2]
 
+    def test_topology_fields_roundtrip(self) -> None:
+        block = EncodedBlock(
+            generators=[1, -2, 1],
+            n_strands=4,
+            sector="TSR",
+            writhe=0,
+            block_index=3,
+            original_length=6,
+            invariant_tier=3,
+            trace_real=1.5,
+            trace_imag=-0.25,
+            topology_layer_index=2,
+            topology_layer_n_chunks=7,
+            topology_nnz_bits=23,
+            topology_dt_scale=1.125,
+            topology_hash32=123456,
+            topology_density_fp=1200,
+            topology_centroid_fp=42000,
+            topology_variance_fp=900,
+            topology_morton_key=987654,
+            topology_commitment=123456789,
+        )
+        d = block.to_dict()
+        recovered = EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+        assert recovered.topology_layer_index == 2
+        assert recovered.topology_layer_n_chunks == 7
+        assert recovered.topology_nnz_bits == 23
+        assert recovered.topology_dt_scale == 1.125
+        assert recovered.topology_hash32 == 123456
+        assert recovered.topology_density_fp == 1200
+        assert recovered.topology_centroid_fp == 42000
+        assert recovered.topology_variance_fp == 900
+        assert recovered.topology_morton_key == 987654
+        assert recovered.topology_commitment == 123456789
+
+
+class TestReconstructivePayloadMetadata:
+    def _sample_metadata(self) -> dict[str, str]:
+        return {
+            "preprocessing_mode": "reconstructive",
+            "tokenizer_id": "frequency-tokenizer",
+            "tokenizer_version": "v1",
+            "domain_kind": "text",
+            "bin_count": "128",
+            "bin_table_hash": "a" * 64,
+            "vocab_hash": "b" * 64,
+            "normalization_profile_id": "osc-norm-v1",
+            "normalization_profile_hash": "c" * 64,
+            "manifold_profile_id": "hypergraph-manifold-v1",
+            "manifold_state_hash": "d" * 64,
+            "reconstructive_graph_hash": "e" * 64,
+            "km_residual_max": "0.001",
+            "km_residual_mean": "0.0001",
+            "km_iters_mean": "5",
+            "km_valid_ratio": "1",
+            "km_seed_vector": "0.1,0.2,0.3",
+            "km_kappa": "0.3",
+            "km_eta": "0.654",
+            "km_tol": "1e-5",
+            "km_max_iter": "100",
+            "km_threshold_residual_max": "1e-5",
+            "km_threshold_valid_ratio": "1",
+            "reconstructive_program_type": "json-literal-v1",
+            "reconstructive_program_payload": '{"raw_json":"{}"}',
+        }
+
+    def test_build_parse_validate_roundtrip(self) -> None:
+        meta = self._sample_metadata()
+        payload = build_reconstructive_payload_metadata(meta)
+        meta["reconstructive_payload_v1"] = payload
+
+        parsed = parse_reconstructive_payload_metadata(meta)
+        assert parsed["model_id"] == "frequency-manifold"
+        assert parsed["model_version"] == "1"
+        validated = validate_reconstructive_payload_metadata(meta)
+        assert validated["domain_kind"] == "text"
+
+    def test_validate_rejects_payload_mismatch(self) -> None:
+        meta = self._sample_metadata()
+        payload = build_reconstructive_payload_metadata(meta)
+        meta["reconstructive_payload_v1"] = payload
+        meta["vocab_hash"] = "f" * 64
+
+        with pytest.raises(FormatError, match="payload mismatch"):
+            validate_reconstructive_payload_metadata(meta)
+
+    def test_commitment_validation_rejects_mismatch(self) -> None:
+        meta = self._sample_metadata()
+        payload = build_reconstructive_payload_metadata(meta)
+        meta["reconstructive_payload_v1"] = payload
+
+        block = EncodedBlock(
+            generators=[1, -2, 1],
+            n_strands=4,
+            sector="TSR",
+            writhe=0,
+            block_index=0,
+            original_length=3,
+            invariant_tier=1,
+        )
+        meta["reconstructive_commitment"] = compute_reconstructive_commitment(payload, (block,))
+        validate_reconstructive_commitment_metadata(meta, (block,))
+
+        bad_meta = dict(meta)
+        bad_meta["reconstructive_commitment"] = "0" * 64
+        with pytest.raises(FormatError, match="commitment mismatch"):
+            validate_reconstructive_commitment_metadata(bad_meta, (block,))
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # EncodedStream round-trip tests
@@ -438,6 +554,12 @@ class TestEncodedStreamRoundTrip:
         stream = _make_stream()
         wire = stream.to_bytes()
         recovered = EncodedStream.from_bytes(wire)
+        assert recovered.version == 2
+
+    def test_version_1_backward_compatibility(self) -> None:
+        stream = _make_stream(version=1)
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
         assert recovered.version == 1
 
     def test_empty_blocks_list(self) -> None:
@@ -465,6 +587,42 @@ class TestEncodedStreamRoundTrip:
         wire = _make_stream().to_bytes()
         recovered = EncodedStream.from_bytes(memoryview(wire))
         assert recovered.n_strands == 4
+
+    def test_hdf5_roundtrip(self) -> None:
+        h5py = pytest.importorskip("h5py")
+        assert h5py is not None
+        stream = _make_stream(blocks=(_TIER1, _TIER2, _TIER3))
+        payload = stream.to_hdf5_bytes()
+        recovered = EncodedStream.from_hdf5_bytes(payload)
+        assert recovered.version == stream.version
+        assert recovered.n_strands == stream.n_strands
+        assert recovered.sector == stream.sector
+        assert recovered.total_bytes == stream.total_bytes
+        assert recovered.checksum == stream.checksum
+        assert recovered.metadata == stream.metadata
+        assert recovered.blocks == stream.blocks
+
+    def test_hdf5_is_more_compact_for_long_generators(self) -> None:
+        h5py = pytest.importorskip("h5py")
+        assert h5py is not None
+        long_block = EncodedBlock(
+            generators=[1 if i % 2 == 0 else -2 for i in range(120_000)],
+            n_strands=4,
+            sector="TSR",
+            writhe=0,
+            block_index=0,
+            original_length=8192,
+            invariant_tier=1,
+        )
+        stream = _make_stream(
+            blocks=(long_block,),
+            n_strands=4,
+            total_bytes=8192,
+            checksum=_make_checksum(b"x" * 8192),
+        )
+        wire = stream.to_bytes()
+        h5 = stream.to_hdf5_bytes()
+        assert len(h5) < len(wire)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

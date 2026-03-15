@@ -57,8 +57,8 @@ encoded = braidcodec.encode(b"Hello, topology!", key)
 decoded = braidcodec.decode(encoded, key)
 assert decoded == b"Hello, topology!"
 
-# Verify integrity (5-channel verification)
-result = braidcodec.verify(encoded, key)
+# Verify integrity (5+1 channel model, topology optional)
+result = braidcodec.verify(encoded, key, topology_check=True)
 assert result.valid
 ```
 

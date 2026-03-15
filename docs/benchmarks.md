@@ -3,11 +3,14 @@
 ## Running Benchmarks Locally
 
 ```bash
-# Run all benchmarks (bench_*.py files need the python_files override)
+# Run all benchmark suites (bench_*.py files need the python_files override)
 pytest tests/benchmarks/ --benchmark-enable -o 'python_files=bench_*.py' -v
 
-# Run a specific benchmark file
-pytest tests/benchmarks/bench_throughput.py --benchmark-enable -o 'python_files=bench_*.py'
+# Run the lightweight core-throughput suite
+pytest tests/benchmarks/bench_core_throughput.py --benchmark-enable -o 'python_files=bench_*.py'
+
+# Run the stress-regime suite (pathological combinations)
+pytest tests/benchmarks/bench_stress_regime.py --benchmark-enable -o 'python_files=bench_*.py'
 
 # Run a quick subset (e.g., 1 KB / TSR / 3 strands)
 pytest tests/benchmarks/ --benchmark-enable -o 'python_files=bench_*.py' -k '1KB and TSR and 3'
@@ -24,15 +27,27 @@ The `-o 'python_files=bench_*.py'` override is required because benchmark files 
 
 ## Parametrization Dimensions
 
-### Throughput Benchmarks (`bench_throughput.py`)
+### Core Throughput Benchmarks (`bench_core_throughput.py`)
 
 | Dimension | Values |
 |-----------|--------|
-| Input size | 1 KB, 10 KB, 100 KB |
+| Input size | 10 KB, 100 KB |
 | n_strands | 3, 4, 5 |
-| Sector | TSR, Ising, Fibonacci |
+| preprocessing_mode | legacy, topology |
+| generators_per_block | 16 |
 
-Tests: `test_encode_throughput`, `test_decode_throughput`, `test_decode_verified_throughput`
+Tests: `test_core_encode_throughput`
+
+### Stress Regime Benchmarks (`bench_stress_regime.py`)
+
+| Dimension | Values |
+|-----------|--------|
+| Input size | 10 KB, 100 KB |
+| n_strands | 6 |
+| preprocessing_mode | legacy, topology |
+| generators_per_block | 16 |
+
+Tests: `test_stress_encode_regime`
 
 ### Compression Benchmarks (`bench_compression.py`)
 
@@ -76,7 +91,12 @@ Ratio = compressed generators / original generators. Lower is better.
 
 ## CI Dashboard
 
-The weekly benchmark CI (Mondays at 6:00 UTC) publishes results to GitHub Pages. View the performance dashboard at:
+The weekly benchmark CI (Mondays at 6:00 UTC) runs two paths:
+
+- `core-throughput` publishes stable trend data to GitHub Pages.
+- `stress-regime` runs in non-blocking reporting mode and emits threshold alerts.
+
+Core trend dashboard:
 
 ```
 https://<owner>.github.io/BraidCodec/benchmarks/
