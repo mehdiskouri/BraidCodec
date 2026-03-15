@@ -229,6 +229,7 @@ class TestCompressStream:
                         layer_index=orig_block.topology_layer_index,
                         signature_hash32=orig_block.topology_hash32,
                         morton_key=orig_block.topology_morton_key,
+                        nnz_bits=orig_block.topology_nnz_bits or 0,
                     )
                     assert comp_block.decode_generators == expected
                 else:

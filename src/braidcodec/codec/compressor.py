@@ -324,6 +324,7 @@ def compress(
                     layer_index=block.topology_layer_index,
                     signature_hash32=block.topology_hash32,
                     morton_key=block.topology_morton_key,
+                    nnz_bits=block.topology_nnz_bits or 0,
                 )
             elif (
                 block.topology_layer_index is not None

@@ -46,6 +46,8 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 	- Program remained `latent-residual-v2` (`codec=bz2-xor-v1`, `predictor=zero-v1`), `exact decode=true`, `verify.valid=true`.
 - Added Morton-index coupling alongside `nnz` in latent residual scoring/predictor shaping (segment-local fitting now mixes coupling density/radius/nnz and Morton lane/index signal deterministically).
 - Post-Morton benchmark on the same subset/config preserved the base85 gain plateau (`wire=60530`, `h5=79019`) with exact fidelity and valid verification, establishing no-regression while broadening the adaptive search signal.
+- Reintegrated `nnz_bits` into topology synthesis/recovery v2 (with Morton retained): encoder now propagates per-block `topology_nnz_bits` through v2 transforms, and decoder/compressor/integrity v2 recovery paths consume the same `nnz_bits` signal.
+- Compatibility status: full type/lint/tests remain green; reconstructive benchmark remained stable at the improved envelope baseline (`wire=60530`, `h5=79019`, exact decode + verify valid).
 
 **Remaining non-binary parity gaps**
 - Full Julia parity is still pending: current compact replay is scenario-constrained (`repeat-text-v1`, `logs-seq-v1`, `json-linear-items-v1`, `json-literal-v1`) rather than a general latent-manifold projection for arbitrary Text/JSON/Logs.

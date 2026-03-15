@@ -313,6 +313,7 @@ def encode(
                 layer_index=profile.layer_index,
                 signature_hash32=profile.signature.hash32,
                 morton_key=morton_key,
+                nnz_bits=profile.nnz_bits,
             )
             decode_generators = None
             topo_commitment = topology_commitment_v2(
@@ -349,7 +350,7 @@ def encode(
                     decode_generators,
                     profile.layer_index if profile is not None else None,
                     None,
-                    None,
+                    profile.nnz_bits if profile is not None else None,
                     None,
                     profile.signature.hash32 if profile is not None else None,
                     None,

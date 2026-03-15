@@ -267,19 +267,24 @@ def synthesize_topology_generators_v2(
     layer_index: int,
     signature_hash32: int,
     morton_key: int,
+    nnz_bits: int = 0,
 ) -> list[int]:
     """Derive compact topology generators for synthesis version 2."""
     span = max(n_strands - 1, 1)
     lane_term = (morton_key & 0x1F) % span
+    nnz_term = max(nnz_bits, 0) % span
+    sign_seed = ((signature_hash32 >> 5) ^ morton_key ^ max(nnz_bits, 0)) & 1
 
     derived: list[int] = []
     for i, gen in enumerate(generators):
         base = abs(gen) - 1
-        shift = ((signature_hash32 >> (i % 24)) + layer_index + lane_term + i) % span
+        shift = ((signature_hash32 >> (i % 24)) + layer_index + lane_term + nnz_term + i) % span
         new_abs = ((base + shift) % span) + 1
 
         sign = 1 if gen > 0 else -1
         if ((signature_hash32 >> (i % 16)) & 1) == 1:
+            sign *= -1
+        if ((max(nnz_bits, 0) + i + sign_seed) & 1) == 1:
             sign *= -1
 
         derived.append(sign * new_abs)
@@ -293,20 +298,25 @@ def recover_legacy_generators_v2(
     layer_index: int,
     signature_hash32: int,
     morton_key: int,
+    nnz_bits: int = 0,
 ) -> list[int]:
     """Invert ``synthesize_topology_generators_v2`` back to legacy generators."""
     span = max(n_strands - 1, 1)
     lane_term = (morton_key & 0x1F) % span
+    nnz_term = max(nnz_bits, 0) % span
+    sign_seed = ((signature_hash32 >> 5) ^ morton_key ^ max(nnz_bits, 0)) & 1
 
     recovered: list[int] = []
     for i, gen in enumerate(topology_generators):
         topo_abs = abs(gen) - 1
-        shift = ((signature_hash32 >> (i % 24)) + layer_index + lane_term + i) % span
+        shift = ((signature_hash32 >> (i % 24)) + layer_index + lane_term + nnz_term + i) % span
         base = (topo_abs - shift) % span
         legacy_abs = base + 1
 
         sign = 1 if gen > 0 else -1
         if ((signature_hash32 >> (i % 16)) & 1) == 1:
+            sign *= -1
+        if ((max(nnz_bits, 0) + i + sign_seed) & 1) == 1:
             sign *= -1
 
         recovered.append(sign * legacy_abs)
