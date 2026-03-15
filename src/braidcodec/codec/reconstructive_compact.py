@@ -51,6 +51,18 @@ def _decompress_by_codec(codec_name: str, data: bytes) -> bytes:
     raise FormatError("Unsupported latent residual codec")
 
 
+def _morton_key_1d(index: int, lane: int = 0) -> int:
+    """Compute compact 1D Morton-like key for deterministic segment shaping."""
+    x = max(index, 0)
+    out = 0
+    bit = 0
+    while x > 0:
+        out |= (x & 1) << (2 * bit)
+        x >>= 1
+        bit += 1
+    return (out << 3) | (max(lane, 0) & 0x7)
+
+
 def _encode_residual_blob(data: bytes) -> str:
     """Encode residual bytes with lower-overhead ASCII envelope."""
     return base64.b85encode(data).decode("ascii")
@@ -81,17 +93,25 @@ def _build_spectral_predictor(
     coupling_density: float,
     coupling_spectral_radius: float,
     coupling_nnz: int,
+    morton_key: int,
 ) -> tuple[bytes, dict[str, int]]:
     """Build deterministic byte predictor stream from coupling features."""
     q_density = round(max(0.0, min(coupling_density, 1.0)) * 65535.0)
     q_radius = round(max(0.0, min(coupling_spectral_radius, 1_000_000.0)))
     q_nnz = round(max(float(coupling_nnz), 0.0) ** 0.5)
+    q_morton = int(morton_key) & 0xFFFF
 
-    seed = (q_density ^ ((q_radius * 131) & 0xFF) ^ (length & 0xFF) ^ (q_nnz & 0xFF)) & 0xFF
-    a = ((q_density % 127) * 2 + 1) & 0xFF
+    seed = (
+        q_density
+        ^ ((q_radius * 131) & 0xFF)
+        ^ (length & 0xFF)
+        ^ (q_nnz & 0xFF)
+        ^ (q_morton & 0xFF)
+    ) & 0xFF
+    a = (((q_density + (q_morton % 31)) % 127) * 2 + 1) & 0xFF
     if a == 0:
         a = 1
-    b = ((q_radius % 251) + 1 + (q_nnz % 29)) & 0xFF
+    b = ((q_radius % 251) + 1 + (q_nnz % 29) + ((q_morton >> 3) % 17)) & 0xFF
     if b == 0:
         b = 1
 
@@ -101,7 +121,7 @@ def _build_spectral_predictor(
     for i in range(1, length):
         out[i] = (a * out[i - 1] + b + (i & 0xFF)) & 0xFF
 
-    return bytes(out), {"seed": seed, "a": a, "b": b, "nnz_q": q_nnz}
+    return bytes(out), {"seed": seed, "a": a, "b": b, "nnz_q": q_nnz, "morton_q": q_morton}
 
 
 def _fit_best_segment_codec(
@@ -110,6 +130,7 @@ def _fit_best_segment_codec(
     coupling_density: float,
     coupling_spectral_radius: float,
     coupling_nnz: int,
+    morton_key: int,
 ) -> tuple[str, str, bytes, dict[str, int]]:
     """Return best (predictor, codec, compressed_residual, predictor_params)."""
     predictors: list[tuple[str, bytes, dict[str, int]]] = []
@@ -126,6 +147,7 @@ def _fit_best_segment_codec(
         coupling_density=coupling_density,
         coupling_spectral_radius=coupling_spectral_radius,
         coupling_nnz=coupling_nnz,
+        morton_key=morton_key,
     )
     predictors.append(("spectral-byte-v1", spectral_pred, spectral_params))
 
@@ -133,6 +155,8 @@ def _fit_best_segment_codec(
     nnz_signal = coupling_nnz / max(len(source), 1)
     if coupling_density > 0.08 or coupling_spectral_radius > 25.0 or nnz_signal > 8.0:
         codecs = ["bz2-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
+    if (morton_key & 1) == 1:
+        codecs = [codecs[1], codecs[0], codecs[2]]
 
     best_predictor = "zero-v1"
     best_codec = "zlib-xor-v1"
@@ -242,6 +266,7 @@ def fit_reconstructive_program(
             coupling_density=c_density,
             coupling_spectral_radius=c_radius,
             coupling_nnz=c_nnz,
+            morton_key=0,
         )
 
         payload_v2 = {
@@ -257,15 +282,19 @@ def fit_reconstructive_program(
         segments: list[dict[str, object]] = []
         segment_size = 32768 if len(source) >= 65536 else 16384
         for start in range(0, len(source), segment_size):
+            segment_index = start // max(segment_size, 1)
+            morton_key = _morton_key_1d(segment_index, lane=(c_nnz & 0x7))
             chunk = source[start : start + segment_size]
-            cp = c_density * (1.0 + ((start // max(segment_size, 1)) % 3) * 0.05)
-            cr = c_radius * (1.0 + ((start // max(segment_size, 1)) % 2) * 0.03)
+            cp = c_density * (1.0 + (morton_key & 0x3) * 0.03)
+            cr = c_radius * (1.0 + ((morton_key >> 2) & 0x3) * 0.02)
             cn = max(0, round(c_nnz * (len(chunk) / max(len(source), 1))))
+            cn = max(0, round(cn * (1.0 + (((morton_key & 0x7) - 3) * 0.02))))
             predictor, codec, compressed, params = _fit_best_segment_codec(
                 chunk,
                 coupling_density=cp,
                 coupling_spectral_radius=cr,
                 coupling_nnz=cn,
+                morton_key=morton_key,
             )
             segments.append(
                 {

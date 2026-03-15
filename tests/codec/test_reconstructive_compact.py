@@ -16,16 +16,38 @@ def test_build_spectral_predictor_changes_with_nnz() -> None:
         coupling_density=0.25,
         coupling_spectral_radius=120.0,
         coupling_nnz=16,
+        morton_key=0,
     )
     p_high, params_high = _build_spectral_predictor(
         128,
         coupling_density=0.25,
         coupling_spectral_radius=120.0,
         coupling_nnz=32000,
+        morton_key=0,
     )
 
     assert p_low != p_high
     assert params_low != params_high
+
+
+def test_build_spectral_predictor_changes_with_morton_index() -> None:
+    p0, params0 = _build_spectral_predictor(
+        128,
+        coupling_density=0.25,
+        coupling_spectral_radius=120.0,
+        coupling_nnz=1024,
+        morton_key=0,
+    )
+    p1, params1 = _build_spectral_predictor(
+        128,
+        coupling_density=0.25,
+        coupling_spectral_radius=120.0,
+        coupling_nnz=1024,
+        morton_key=17,
+    )
+
+    assert p0 != p1
+    assert params0 != params1
 
 
 def test_fit_reconstructive_program_accepts_nnz_signal() -> None:
