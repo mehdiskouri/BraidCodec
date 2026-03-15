@@ -14,9 +14,18 @@ import re
 import zlib
 from typing import Literal
 
+import msgpack
+
 from braidcodec._exceptions import FormatError
 
 DomainKind = Literal["text", "json", "logs"]
+_PACK_PREFIX = "~mp85:"
+_PREDICTOR_ENCODE: dict[str, str] = {"zero-v1": "z", "prev-byte-v1": "p", "spectral-byte-v1": "s"}
+_PREDICTOR_DECODE: dict[str, str] = {v: k for k, v in _PREDICTOR_ENCODE.items()}
+_CODEC_ENCODE: dict[str, str] = {"zlib-xor-v1": "z", "bz2-xor-v1": "b", "lzma-xor-v1": "l"}
+_CODEC_DECODE: dict[str, str] = {v: k for k, v in _CODEC_ENCODE.items()}
+_DOMAIN_ENCODE: dict[str, str] = {"text": "t", "json": "j", "logs": "l"}
+_DOMAIN_DECODE: dict[str, str] = {v: k for k, v in _DOMAIN_ENCODE.items()}
 
 
 def _compress_zlib(data: bytes) -> bytes:
@@ -85,6 +94,47 @@ def _decode_residual_blob(program: dict[str, object]) -> bytes:
             raise FormatError("Invalid latent residual base64 payload") from exc
 
     raise FormatError("Missing latent residual payload bytes")
+
+
+def _serialize_program_payload(program: dict[str, object]) -> str:
+    """Serialize reconstructive program payload with compact binary fallback."""
+    json_payload = json.dumps(program, sort_keys=True, separators=(",", ":"))
+    packed = msgpack.packb(program, use_bin_type=True)
+    packed_blob = base64.b85encode(zlib.compress(packed, level=9)).decode("ascii")
+    packed_payload = _PACK_PREFIX + packed_blob
+    return packed_payload if len(packed_payload) < len(json_payload) else json_payload
+
+
+def parse_reconstructive_program_payload(raw_payload: str) -> dict[str, object]:
+    """Parse reconstructive program payload from JSON or packed base85 blob."""
+    if raw_payload.startswith(_PACK_PREFIX):
+        encoded = raw_payload[len(_PACK_PREFIX) :]
+        try:
+            packed = base64.b85decode(encoded.encode("ascii"))
+            decoded = msgpack.unpackb(zlib.decompress(packed), raw=False)
+        except Exception as exc:
+            raise FormatError("Invalid packed reconstructive program payload") from exc
+        if not isinstance(decoded, dict):
+            raise FormatError("Packed reconstructive program payload must decode to object")
+        return {str(k): v for k, v in decoded.items()}
+
+    try:
+        decoded_json = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise FormatError("Invalid reconstructive_program_payload JSON") from exc
+    if not isinstance(decoded_json, dict):
+        raise FormatError("reconstructive_program_payload must decode to object")
+    return {str(k): v for k, v in decoded_json.items()}
+
+
+def _coerce_int_field(value: object, *, field_name: str) -> int:
+    """Coerce JSON/msgpack field to int with explicit validation."""
+    if not isinstance(value, int | str):
+        raise FormatError(f"Invalid {field_name} in reconstructive program")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise FormatError(f"Invalid {field_name} in reconstructive program") from exc
 
 
 def _build_spectral_predictor(
@@ -270,9 +320,9 @@ def fit_reconstructive_program(
         )
 
         payload_v2 = {
-            "d": domain,
-            "p": best_predictor,
-            "c": best_codec,
+            "d": _DOMAIN_ENCODE.get(domain, domain),
+            "p": _PREDICTOR_ENCODE.get(best_predictor, best_predictor),
+            "c": _CODEC_ENCODE.get(best_codec, best_codec),
             "n": len(source),
             "r85": _encode_residual_blob(best_compressed),
         }
@@ -301,33 +351,33 @@ def fit_reconstructive_program(
                 {
                     "o": start,
                     "l": len(chunk),
-                    "p": predictor,
-                    "c": codec,
+                    "p": _PREDICTOR_ENCODE.get(predictor, predictor),
+                    "c": _CODEC_ENCODE.get(codec, codec),
                     "r85": _encode_residual_blob(compressed),
                 }
             )
             if params:
                 segments[-1]["pp"] = params
 
-        payload_v3 = {
-            "d": domain,
+        payload_v3: dict[str, object] = {
+            "d": _DOMAIN_ENCODE.get(domain, domain),
             "ss": segment_size,
             "n": len(source),
             "s": segments,
         }
 
-        payload_v2_json = json.dumps(payload_v2, sort_keys=True, separators=(",", ":"))
-        payload_v3_json = json.dumps(payload_v3, sort_keys=True, separators=(",", ":"))
+        payload_v2_serialized = _serialize_program_payload(payload_v2)
+        payload_v3_serialized = _serialize_program_payload(payload_v3)
 
-        if len(payload_v3_json) < len(payload_v2_json):
+        if len(payload_v3_serialized) < len(payload_v2_serialized):
             return {
                 "reconstructive_program_type": "latent-residual-v3",
-                "reconstructive_program_payload": payload_v3_json,
+                "reconstructive_program_payload": payload_v3_serialized,
             }
 
         return {
             "reconstructive_program_type": "latent-residual-v2",
-            "reconstructive_program_payload": payload_v2_json,
+            "reconstructive_program_payload": payload_v2_serialized,
         }
 
     if domain_kind == "text":
@@ -339,13 +389,11 @@ def fit_reconstructive_program(
                 unit_b64 = base64.b64encode(unit.encode("utf-8")).decode("ascii")
                 return {
                     "reconstructive_program_type": "repeat-text-v1",
-                    "reconstructive_program_payload": json.dumps(
+                    "reconstructive_program_payload": _serialize_program_payload(
                         {
                             "unit_b64": unit_b64,
                             "repeat_count": count,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
+                        }
                     ),
                 }
         return _latent_residual_program(canonical_text, domain=domain_kind)
@@ -378,13 +426,11 @@ def fit_reconstructive_program(
 
         return {
             "reconstructive_program_type": "json-linear-items-v1",
-            "reconstructive_program_payload": json.dumps(
+            "reconstructive_program_payload": _serialize_program_payload(
                 {
                     "count": len(items),
                     "json_style": json_style,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
+                }
             ),
         }
 
@@ -414,14 +460,12 @@ def fit_reconstructive_program(
 
         return {
             "reconstructive_program_type": "logs-seq-v1",
-            "reconstructive_program_payload": json.dumps(
+            "reconstructive_program_payload": _serialize_program_payload(
                 {
                     "prefix": prefix,
                     "count": len(lines),
                     "width": width,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
+                }
             ),
         }
 
@@ -436,14 +480,14 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
     if not raw_program:
         raise FormatError("Missing reconstructive_program_payload")
 
-    try:
-        program = json.loads(raw_program)
-    except json.JSONDecodeError as exc:
-        raise FormatError("Invalid reconstructive_program_payload JSON") from exc
+    program = parse_reconstructive_program_payload(raw_program)
 
     if program_type == "repeat-text-v1":
         unit_b64 = str(program.get("unit_b64", ""))
-        repeat_count = int(program.get("repeat_count", -1))
+        repeat_count = _coerce_int_field(
+            program.get("repeat_count", -1),
+            field_name="repeat_count",
+        )
         if repeat_count < 0:
             raise FormatError("Invalid repeat_count in reconstructive program")
         try:
@@ -453,7 +497,7 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         return (unit * repeat_count).encode("utf-8")
 
     if program_type == "json-linear-items-v1":
-        count = int(program.get("count", -1))
+        count = _coerce_int_field(program.get("count", -1), field_name="count")
         json_style = str(program.get("json_style", "compact"))
         if count < 0:
             raise FormatError("Invalid count in reconstructive program")
@@ -471,7 +515,12 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
     if program_type in {"latent-residual-v1", "latent-residual-v2"}:
         predictor = str(program.get("predictor", program.get("p", "")))
         codec = str(program.get("codec", program.get("c", "")))
-        original_length = int(program.get("original_length", program.get("n", -1)))
+        predictor = _PREDICTOR_DECODE.get(predictor, predictor)
+        codec = _CODEC_DECODE.get(codec, codec)
+        original_length = _coerce_int_field(
+            program.get("original_length", program.get("n", -1)),
+            field_name="original_length",
+        )
         if predictor not in {"zero-v1", "prev-byte-v1", "spectral-byte-v1"}:
             raise FormatError("Unsupported latent residual predictor")
         if codec not in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}:
@@ -498,7 +547,10 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         )
 
     if program_type == "latent-residual-v3":
-        original_length = int(program.get("original_length", program.get("n", -1)))
+        original_length = _coerce_int_field(
+            program.get("original_length", program.get("n", -1)),
+            field_name="original_length",
+        )
         segments_obj = program.get("segments", program.get("s", []))
         if original_length < 0 or not isinstance(segments_obj, list):
             raise FormatError("Invalid latent residual v3 parameters")
@@ -512,10 +564,12 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
             raw_length = segment.get("length", segment.get("l", -1))
             if not isinstance(raw_offset, int | str) or not isinstance(raw_length, int | str):
                 raise FormatError("Invalid latent residual v3 segment layout")
-            offset = int(raw_offset)
-            length = int(raw_length)
+            offset = _coerce_int_field(raw_offset, field_name="segment offset")
+            length = _coerce_int_field(raw_length, field_name="segment length")
             predictor = str(segment.get("predictor", segment.get("p", "")))
             codec = str(segment.get("codec", segment.get("c", "")))
+            predictor = _PREDICTOR_DECODE.get(predictor, predictor)
+            codec = _CODEC_DECODE.get(codec, codec)
             params_obj_raw = segment.get("predictor_params", segment.get("pp", {}))
             params_obj = params_obj_raw if isinstance(params_obj_raw, dict) else {}
 
@@ -546,8 +600,8 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
 
     if program_type == "logs-seq-v1":
         prefix = str(program.get("prefix", ""))
-        count = int(program.get("count", -1))
-        width = int(program.get("width", -1))
+        count = _coerce_int_field(program.get("count", -1), field_name="count")
+        width = _coerce_int_field(program.get("width", -1), field_name="width")
         if count < 0 or width < 1:
             raise FormatError("Invalid logs program parameters")
         lines = [f"{prefix}{str(i).zfill(width)}Z INFO core event={i}" for i in range(count)]

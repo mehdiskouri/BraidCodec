@@ -53,6 +53,12 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 	- Wire container: `60461` bytes (`-52.77%` vs input), improved from `60530`.
 	- HDF5 container: `78946` bytes (`-38.33%` vs input), improved from `79019`.
 	- Program remained `latent-residual-v2`; exact decode and verify validity unchanged.
+- Added optional packed program-payload parser/serializer path (`~mp85:` msgpack+zlib+base85) with fallback to compact JSON, while keeping backward compatibility for prior payload forms.
+- Added symbol-coded identifiers for latent residual payload values (`predictor`, `codec`, `domain`) to further reduce envelope overhead.
+- Post "max overhead" pass benchmark on the same subset/config improved again with fidelity preserved:
+	- Wire container: `60443` bytes (`-52.78%` vs input), improved from `60461`.
+	- HDF5 container: `78928` bytes (`-38.34%` vs input), improved from `78946`.
+	- Program remained `latent-residual-v2`; exact decode and verify validity unchanged.
 
 **Remaining non-binary parity gaps**
 - Full Julia parity is still pending: current compact replay is scenario-constrained (`repeat-text-v1`, `logs-seq-v1`, `json-linear-items-v1`, `json-literal-v1`) rather than a general latent-manifold projection for arbitrary Text/JSON/Logs.

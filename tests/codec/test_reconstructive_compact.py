@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
-
 from braidcodec.codec.reconstructive_compact import (
     _build_spectral_predictor,
     fit_reconstructive_program,
+    parse_reconstructive_program_payload,
 )
 
 
@@ -63,7 +62,7 @@ def test_fit_reconstructive_program_accepts_nnz_signal() -> None:
         "latent-residual-v2",
         "latent-residual-v3",
     }
-    payload = json.loads(fitted["reconstructive_program_payload"])
+    payload = parse_reconstructive_program_payload(fitted["reconstructive_program_payload"])
     assert isinstance(payload, dict)
 
 
@@ -76,7 +75,7 @@ def test_fit_reconstructive_program_emits_base85_residual_payload() -> None:
         coupling_spectral_radius=300.0,
         coupling_nnz=1024,
     )
-    payload = json.loads(fitted["reconstructive_program_payload"])
+    payload = parse_reconstructive_program_payload(fitted["reconstructive_program_payload"])
 
     if fitted["reconstructive_program_type"] == "latent-residual-v2":
         residual = payload.get("residual_b85", payload.get("r85"))

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import blake3
 import numpy as np
 import pytest
@@ -16,6 +14,7 @@ from braidcodec.algebra.braid_equations import (
 )
 from braidcodec.codec.chunker import bytes_to_generators, compute_block_size
 from braidcodec.codec.encoder import _build_layer_aware_batches, encode
+from braidcodec.codec.reconstructive_compact import parse_reconstructive_program_payload
 from braidcodec.codec.schema import (
     EncodedStream,
     parse_reconstructive_payload_metadata,
@@ -437,7 +436,9 @@ class TestEncodePreprocessingModes:
             "latent-residual-v2",
             "latent-residual-v3",
         }
-        program_payload = json.loads(payload["reconstructive_program_payload"])
+        program_payload = parse_reconstructive_program_payload(
+            payload["reconstructive_program_payload"]
+        )
         if payload["reconstructive_program_type"] == "latent-residual-v2":
             predictor = program_payload.get("predictor", program_payload.get("p"))
             codec = program_payload.get("codec", program_payload.get("c"))
@@ -445,8 +446,11 @@ class TestEncodePreprocessingModes:
                 "zero-v1",
                 "prev-byte-v1",
                 "spectral-byte-v1",
+                "z",
+                "p",
+                "s",
             }
-            assert codec in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}
+            assert codec in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1", "z", "b", "l"}
         else:
             segments = program_payload.get("segments", program_payload.get("s"))
             original_length = program_payload.get("original_length", program_payload.get("n"))
