@@ -436,6 +436,7 @@ class TestEncodePreprocessingModes:
             "latent-residual-v2",
             "latent-residual-v3",
         }
+        assert "rpb" in stream.metadata or "reconstructive_program_payload_bin" in stream.metadata
         program_payload = parse_reconstructive_program_payload(
             payload["reconstructive_program_payload"]
         )

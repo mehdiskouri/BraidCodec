@@ -72,6 +72,8 @@ if TYPE_CHECKING:
 
 _TIER_2_MAX_GENERATORS: int = 12
 _VALID_PREPROCESSING_MODES: frozenset[str] = frozenset({"topology", "legacy", "reconstructive"})
+_RECONSTRUCTIVE_PAYLOAD_KEY = "reconstructive_payload_v1"
+_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT = "rp1"
 
 _BlockTask = tuple[
     list[int],
@@ -183,6 +185,14 @@ def _encode_batch(batch: list[_BlockTask]) -> list[EncodedBlock]:
     return [_encode_block(*task) for task in batch]
 
 
+def _get_reconstructive_payload_blob(metadata: dict[str, str]) -> str:
+    """Return reconstructive payload blob from short or legacy key."""
+    payload = metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT, "")
+    if payload:
+        return payload
+    return metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY, "")
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 
@@ -264,7 +274,7 @@ def encode(
             "timing_total_s": f"{(time.perf_counter() - t_start):.6f}",
             **reconstructive_meta,
         }
-        payload_json = metadata.get("reconstructive_payload_v1", "")
+        payload_json = _get_reconstructive_payload_blob(metadata)
         if isinstance(payload_json, str) and payload_json:
             metadata["reconstructive_commitment"] = compute_reconstructive_commitment(
                 payload_json,
@@ -423,7 +433,7 @@ def encode(
     }
 
     if preprocessing_mode == "reconstructive":
-        payload_json = metadata.get("reconstructive_payload_v1", "")
+        payload_json = _get_reconstructive_payload_blob(metadata)
         if isinstance(payload_json, str) and payload_json:
             metadata["reconstructive_commitment"] = compute_reconstructive_commitment(
                 payload_json,
@@ -593,11 +603,21 @@ def _build_reconstructive_metadata(
         coupling_nnz=coupling.nnz,
     )
     metadata.update(compact_program)
+
+    # Side-channel large program payload to avoid JSON-escape overhead inside
+    # reconstructive_payload_v1 while keeping decode contract backward-compatible.
+    program_payload = metadata.get("reconstructive_program_payload", "")
+    if isinstance(program_payload, str) and program_payload:
+        metadata["rpb"] = program_payload
+        metadata["reconstructive_program_payload"] = "@"
+
     full_metadata = {"preprocessing_mode": "reconstructive", **metadata}
     validate_reconstructive_metadata(full_metadata)
-    metadata["reconstructive_payload_v1"] = build_reconstructive_payload_metadata(full_metadata)
-    # Keep bulky compact program bytes only inside reconstructive_payload_v1 to
-    # avoid serializing the same payload twice in stream metadata.
+    metadata[_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT] = build_reconstructive_payload_metadata(
+        full_metadata
+    )
+    # Top-level program fields are no longer needed after payload bundle construction.
+    metadata.pop("reconstructive_program_type", None)
     metadata.pop("reconstructive_program_payload", None)
     return metadata
 

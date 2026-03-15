@@ -25,6 +25,12 @@ from braidcodec.crypto.keys import BraidKey, keygen
 if TYPE_CHECKING:
     from braidcodec.codec.schema import EncodedStream
 
+
+def _payload_key(meta: dict[str, str]) -> str:
+    if "rp1" in meta:
+        return "rp1"
+    return "reconstructive_payload_v1"
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 # k=8 → tier 2 (Jones), fast state-sum (2^8 = 256 states).
@@ -214,6 +220,7 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="text",
         )
         bad_meta = dict(stream.metadata)
+        bad_meta.pop("rp1", None)
         bad_meta.pop("reconstructive_payload_v1", None)
         tampered = replace(stream, metadata=bad_meta)
 
@@ -231,7 +238,7 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="json",
         )
         bad_meta = dict(stream.metadata)
-        bad_meta["reconstructive_payload_v1"] = "not-json"
+        bad_meta[_payload_key(bad_meta)] = "not-json"
         tampered = replace(stream, metadata=bad_meta)
 
         with pytest.raises(FormatError, match="JSON"):
@@ -265,13 +272,14 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="json",
         )
         bad_meta = dict(stream.metadata)
-        payload_obj = json.loads(bad_meta["reconstructive_payload_v1"])
+        payload_key = _payload_key(bad_meta)
+        payload_obj = json.loads(bad_meta[payload_key])
         payload_obj["km_kappa"] = "0.8"
         payload_obj["km_eta"] = "0.4"
         payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
         bad_meta["km_kappa"] = "0.8"
         bad_meta["km_eta"] = "0.4"
-        bad_meta["reconstructive_payload_v1"] = payload
+        bad_meta[payload_key] = payload
         bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
             payload,
             stream.blocks,
@@ -292,7 +300,8 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="text",
         )
         bad_meta = dict(stream.metadata)
-        payload_obj = json.loads(bad_meta["reconstructive_payload_v1"])
+        payload_key = _payload_key(bad_meta)
+        payload_obj = json.loads(bad_meta[payload_key])
         payload_obj["reconstructive_program_payload"] = json.dumps(
             {"unit_b64": "QQ==", "repeat_count": 1},
             sort_keys=True,
@@ -300,7 +309,7 @@ class TestDecodeReconstructiveRoute:
         )
         payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
         bad_meta["reconstructive_program_payload"] = payload_obj["reconstructive_program_payload"]
-        bad_meta["reconstructive_payload_v1"] = payload
+        bad_meta[payload_key] = payload
         bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
             payload,
             stream.blocks,

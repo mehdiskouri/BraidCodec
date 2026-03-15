@@ -59,6 +59,21 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 	- Wire container: `60443` bytes (`-52.78%` vs input), improved from `60461`.
 	- HDF5 container: `78928` bytes (`-38.34%` vs input), improved from `78946`.
 	- Program remained `latent-residual-v2`; exact decode and verify validity unchanged.
+- Applied short side-channel metadata alias (`rpb`) for reconstructive payload transfer path and validated short-or-legacy compatibility in schema parsing.
+- Post short-key side-channel benchmark on the same subset/config improved further with fidelity preserved:
+	- Wire container: `60436` bytes (`-52.79%` vs input), improved from `60443`.
+	- HDF5 container: `78905` bytes (`-38.36%` vs input), improved from `78928`.
+	- Program remained `latent-residual-v2`; exact decode and verify validity unchanged.
+- Removed top-level `reconstructive_program_type` mirror after payload bundle construction and shortened side-channel marker from `@bin` to `@` (schema keeps backward compatibility for both markers).
+- Post marker/type-mirror reduction benchmark on the same subset/config improved again with fidelity preserved:
+	- Wire container: `60386` bytes (`-52.82%` vs input), improved from `60436`.
+	- HDF5 container: `78851` bytes (`-38.40%` vs input), improved from `78905`.
+	- Program remained `latent-residual-v2`; exact decode and verify validity unchanged.
+- Added short reconstructive payload metadata alias (`rp1`) as the encoder emission key, while schema/decoder/integrity remain backward-compatible with legacy `reconstructive_payload_v1`.
+- Post payload-key alias benchmark on the same subset/config improved further with fidelity preserved:
+	- Wire container: `60364` bytes (`-52.84%` vs input), improved from `60386`.
+	- HDF5 container: `78829` bytes (`-38.42%` vs input), improved from `78851`.
+	- Program remained `latent-residual-v2`; exact decode and verify validity unchanged.
 
 **Remaining non-binary parity gaps**
 - Full Julia parity is still pending: current compact replay is scenario-constrained (`repeat-text-v1`, `logs-seq-v1`, `json-linear-items-v1`, `json-literal-v1`) rather than a general latent-manifold projection for arbitrary Text/JSON/Logs.
@@ -178,3 +193,12 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 1. Float profile: start reconstructive solver in Float64 for stability, then evaluate mixed precision.
 1. Bin table governance: freeze and version bin tables to avoid silent drift.
 1. Toolchain pinning: binary action extraction requires a pinned compiler/IR version matrix for deterministic claims.
+
+**Day-End Assumptions and Fidelity Notes**
+- Assumption: benchmark comparisons are made on the same deterministic input envelope (`NeelNanda/pile-10k` stream slice, `128006` bytes) and deterministic keying (`theta_offset=0.0`), so byte deltas are attributable to schema/metadata changes rather than data drift.
+- Assumption: reconstructive compact mode remains scoped to UTF-8 `Text/JSON/Logs`; unsupported binary/general-language replay remains out of scope for these gains.
+- Assumption: short-key aliases (`rpb`, `rp1`) are wire-level compaction optimizations only; schema parsing remains backward-compatible with legacy keys/markers (`reconstructive_program_payload_bin`, `reconstructive_payload_v1`, `@bin`).
+- Fidelity maintenance: checksum remains authoritative for byte-exactness; decode must reconstruct original bytes and then pass checksum validation.
+- Fidelity maintenance: reconstructive commitment (`reconstructive_commitment`) still binds payload+blocks, preventing silent payload mutation when metadata keys are compacted.
+- Fidelity maintenance: contraction and solver gates (`km_kappa`, `km_eta`, residual/valid-ratio thresholds) remain enforced through decode/integrity contract validation.
+- Fidelity maintenance: every overhead change in this cycle was revalidated with strict gates (ruff, mypy, focused reconstructive tests) and corpus benchmark checks requiring `exact_decode=True` and `verify.valid=True`.

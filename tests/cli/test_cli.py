@@ -54,6 +54,12 @@ def encoded_file(key_file: Path, sample_file: Path, tmp_path: Path, runner: CliR
     return out
 
 
+def _payload_key(meta: dict[str, str]) -> str:
+    if "rp1" in meta:
+        return "rp1"
+    return "reconstructive_payload_v1"
+
+
 def _tamper_reconstructive_payload_contraction(path: Path) -> None:
     """Mutate reconstructive payload K_M params so contraction fails."""
     raw = path.read_bytes()
@@ -64,13 +70,14 @@ def _tamper_reconstructive_payload_contraction(path: Path) -> None:
         stream = EncodedStream.from_bytes(raw)
         is_hdf5 = False
     meta = dict(stream.metadata)
-    payload_obj = json.loads(meta["reconstructive_payload_v1"])
+    payload_key = _payload_key(meta)
+    payload_obj = json.loads(meta[payload_key])
     payload_obj["km_kappa"] = "0.8"
     payload_obj["km_eta"] = "0.4"
     payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
     meta["km_kappa"] = "0.8"
     meta["km_eta"] = "0.4"
-    meta["reconstructive_payload_v1"] = payload
+    meta[payload_key] = payload
     meta["reconstructive_commitment"] = compute_reconstructive_commitment(payload, stream.blocks)
     tampered = EncodedStream(
         blocks=stream.blocks,

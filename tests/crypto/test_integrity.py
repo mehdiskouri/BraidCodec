@@ -23,6 +23,12 @@ _K_SMALL: int = 8  # tier 2 (Jones)
 _K_DEFAULT: int = 32  # tier 3 (trace)
 
 
+def _payload_key(meta: dict[str, str]) -> str:
+    if "rp1" in meta:
+        return "rp1"
+    return "reconstructive_payload_v1"
+
+
 def _make_key(sector: str = "TSR", theta_offset: float = 1.0, n_strands: int = 4) -> BraidKey:
     return keygen(sector=sector, n_strands=n_strands, theta_offset=theta_offset)
 
@@ -234,13 +240,14 @@ class TestVerifyCorruption:
             preprocessing_mode="reconstructive",
         )
         bad_meta = dict(stream.metadata)
-        payload_obj = json.loads(bad_meta["reconstructive_payload_v1"])
+        payload_key = _payload_key(bad_meta)
+        payload_obj = json.loads(bad_meta[payload_key])
         payload_obj["km_kappa"] = "0.8"
         payload_obj["km_eta"] = "0.4"
         payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
         bad_meta["km_kappa"] = "0.8"
         bad_meta["km_eta"] = "0.4"
-        bad_meta["reconstructive_payload_v1"] = payload
+        bad_meta[payload_key] = payload
         bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
             payload,
             stream.blocks,

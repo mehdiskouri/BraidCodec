@@ -59,6 +59,26 @@ _RECONSTRUCTIVE_REQUIRED_METADATA: frozenset[str] = frozenset(
     }
 )
 _RECONSTRUCTIVE_PAYLOAD_KEY = "reconstructive_payload_v1"
+_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT = "rp1"
+_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY_SHORT = "rpb"
+_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY = "reconstructive_program_payload_bin"
+_RECONSTRUCTIVE_PROGRAM_PAYLOAD_SIDEBAND_MARKERS: frozenset[str] = frozenset({"@", "@bin"})
+
+
+def _get_reconstructive_program_sidechannel(metadata: Mapping[str, str]) -> str:
+    """Return reconstructive program side-channel blob if present."""
+    blob = str(metadata.get(_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY_SHORT, ""))
+    if blob:
+        return blob
+    return str(metadata.get(_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY, ""))
+
+
+def _get_reconstructive_payload_blob(metadata: Mapping[str, str]) -> str:
+    """Return compact reconstructive payload blob from short or legacy key."""
+    blob = str(metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT, ""))
+    if blob:
+        return blob
+    return str(metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY, ""))
 _RECONSTRUCTIVE_PAYLOAD_REQUIRED_KEYS: frozenset[str] = frozenset(
     {
         "model_id",
@@ -1002,7 +1022,7 @@ def build_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> str:
 
 def parse_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
     """Parse compact reconstructive payload JSON from stream metadata."""
-    payload_blob = str(metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY, ""))
+    payload_blob = _get_reconstructive_payload_blob(metadata)
     if not payload_blob:
         raise FormatError(f"Missing {_RECONSTRUCTIVE_PAYLOAD_KEY} metadata entry")
 
@@ -1019,7 +1039,19 @@ def parse_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dict[s
             f"{_RECONSTRUCTIVE_PAYLOAD_KEY} must decode to an object",
         )
 
-    return {str(k): str(v) for k, v in payload_obj.items()}
+    payload = {str(k): str(v) for k, v in payload_obj.items()}
+
+    marker = payload.get("reconstructive_program_payload", "")
+    if marker in _RECONSTRUCTIVE_PROGRAM_PAYLOAD_SIDEBAND_MARKERS:
+        program_blob = _get_reconstructive_program_sidechannel(metadata)
+        if not program_blob:
+            raise FormatError(
+                "Missing reconstructive program payload side-channel",
+                key=_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY,
+            )
+        payload["reconstructive_program_payload"] = program_blob
+
+    return payload
 
 
 def validate_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
@@ -1062,6 +1094,12 @@ def validate_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dic
         # Some large payload mirrors may be omitted from top-level metadata for
         # compactness; if present they must exactly match the payload contract.
         if key_name not in metadata:
+            continue
+        if (
+            key_name == "reconstructive_program_payload"
+            and str(metadata.get(key_name, "")) in _RECONSTRUCTIVE_PROGRAM_PAYLOAD_SIDEBAND_MARKERS
+            and _get_reconstructive_program_sidechannel(metadata)
+        ):
             continue
         if str(metadata.get(key_name, "")) != payload[key_name]:
             raise FormatError(
@@ -1109,7 +1147,7 @@ def validate_reconstructive_commitment_metadata(
     blocks: tuple[EncodedBlock, ...],
 ) -> None:
     """Validate reconstructive commitment metadata against stream blocks."""
-    payload_json = str(metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY, ""))
+    payload_json = _get_reconstructive_payload_blob(metadata)
     if not payload_json:
         raise FormatError(f"Missing {_RECONSTRUCTIVE_PAYLOAD_KEY} metadata entry")
 
