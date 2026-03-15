@@ -417,6 +417,10 @@ class TestEncodePreprocessingModes:
         assert "fidelity_topology" in stream.metadata
         assert "fidelity_coherence" in stream.metadata
         assert "fidelity_bundle_v1" in stream.metadata
+        assert "coupling_matrix_nnz" in stream.metadata
+        assert "coupling_matrix_density" in stream.metadata
+        assert "coupling_matrix_spectral_radius" in stream.metadata
+        assert "coupling_matrix_hash" in stream.metadata
 
     def test_reconstructive_mode_uses_latent_residual_for_nonrepeating_text(self) -> None:
         key = _make_key()
@@ -432,6 +436,7 @@ class TestEncodePreprocessingModes:
         assert payload["reconstructive_program_type"] == "latent-residual-v1"
         program_payload = json.loads(payload["reconstructive_program_payload"])
         assert program_payload["predictor"] in {"zero-v1", "prev-byte-v1"}
+        assert program_payload["codec"] in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}
 
     def test_reconstructive_mode_keeps_repeat_program_for_periodic_text(self) -> None:
         key = _make_key()

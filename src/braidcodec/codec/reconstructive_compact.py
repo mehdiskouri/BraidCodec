@@ -7,7 +7,9 @@ Text/JSON/Logs without per-block generator payloads.
 from __future__ import annotations
 
 import base64
+import bz2
 import json
+import lzma
 import re
 import zlib
 from typing import Literal
@@ -15,6 +17,28 @@ from typing import Literal
 from braidcodec._exceptions import FormatError
 
 DomainKind = Literal["text", "json", "logs"]
+
+
+def _compress_zlib(data: bytes) -> bytes:
+    return zlib.compress(data, level=9)
+
+
+def _compress_bz2(data: bytes) -> bytes:
+    return bz2.compress(data, compresslevel=9)
+
+
+def _compress_lzma(data: bytes) -> bytes:
+    return lzma.compress(data, preset=9)
+
+
+def _compress_by_codec(codec_name: str, data: bytes) -> bytes:
+    if codec_name == "zlib-xor-v1":
+        return _compress_zlib(data)
+    if codec_name == "bz2-xor-v1":
+        return _compress_bz2(data)
+    if codec_name == "lzma-xor-v1":
+        return _compress_lzma(data)
+    raise FormatError("Unsupported latent residual codec")
 
 
 def _smallest_repeat_unit(text: str) -> tuple[str, int] | None:
@@ -31,7 +55,13 @@ def _smallest_repeat_unit(text: str) -> tuple[str, int] | None:
     return None
 
 
-def fit_reconstructive_program(canonical_text: str, *, domain_kind: DomainKind) -> dict[str, str]:
+def fit_reconstructive_program(
+    canonical_text: str,
+    *,
+    domain_kind: DomainKind,
+    coupling_density: float | None = None,
+    coupling_spectral_radius: float | None = None,
+) -> dict[str, str]:
     """Fit a compact deterministic reconstruction program for canonical text."""
     def _latent_residual_program(raw_text: str, *, domain: DomainKind) -> dict[str, str]:
         source = raw_text.encode("utf-8")
@@ -48,17 +78,27 @@ def fit_reconstructive_program(canonical_text: str, *, domain_kind: DomainKind) 
         predictors.append(("prev-byte-v1", bytes(prev_pred)))
 
         best_predictor = "zero-v1"
+        best_codec = "zlib-xor-v1"
         best_compressed = b""
         best_len: int | None = None
 
+        codecs = ["zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"]
+
+        # Coupling-aware ordering: stronger long-range coupling often benefits
+        # from heavier dictionary codecs first.
+        if (coupling_density or 0.0) > 0.08 or (coupling_spectral_radius or 0.0) > 25.0:
+            codecs = ["bz2-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
+
         for predictor_name, predicted in predictors:
             residual = bytes(s ^ p for s, p in zip(source, predicted, strict=False))
-            compressed = zlib.compress(residual, level=9)
-            clen = len(compressed)
-            if best_len is None or clen < best_len:
-                best_len = clen
-                best_predictor = predictor_name
-                best_compressed = compressed
+            for codec_name in codecs:
+                compressed = _compress_by_codec(codec_name, residual)
+                clen = len(compressed)
+                if best_len is None or clen < best_len:
+                    best_len = clen
+                    best_predictor = predictor_name
+                    best_codec = codec_name
+                    best_compressed = compressed
 
         return {
             "reconstructive_program_type": "latent-residual-v1",
@@ -66,7 +106,7 @@ def fit_reconstructive_program(canonical_text: str, *, domain_kind: DomainKind) 
                 {
                     "domain_kind": domain,
                     "predictor": best_predictor,
-                    "codec": "zlib-xor-v1",
+                    "codec": best_codec,
                     "original_length": len(source),
                     "residual_b64": base64.b64encode(best_compressed).decode("ascii"),
                 },
@@ -220,14 +260,19 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         residual_b64 = str(program.get("residual_b64", ""))
         if predictor not in {"zero-v1", "prev-byte-v1"}:
             raise FormatError("Unsupported latent residual predictor")
-        if codec != "zlib-xor-v1":
+        if codec not in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}:
             raise FormatError("Unsupported latent residual codec")
         if original_length < 0 or not residual_b64:
             raise FormatError("Invalid latent residual program parameters")
 
         try:
             compressed = base64.b64decode(residual_b64.encode("ascii"))
-            residual = zlib.decompress(compressed)
+            if codec == "zlib-xor-v1":
+                residual = zlib.decompress(compressed)
+            elif codec == "bz2-xor-v1":
+                residual = bz2.decompress(compressed)
+            else:
+                residual = lzma.decompress(compressed)
         except Exception as exc:
             raise FormatError("Invalid latent residual payload encoding") from exc
 

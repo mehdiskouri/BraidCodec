@@ -5,7 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 from braidcodec.codec.manifold import (
+    build_coupling_matrix_summary,
     build_deterministic_hypergraph,
+    coupling_matrix_metadata,
     fit_compact_manifold_state,
     manifold_metadata,
     manifold_seed_vector,
@@ -68,3 +70,29 @@ def test_metadata_fields_present() -> None:
     assert metadata["manifold_profile_id"] == "hypergraph-manifold-v1"
     assert int(metadata["manifold_layer_count"]) == state.layer_count
     assert metadata["manifold_state_hash"] == state.state_hash
+
+
+def test_coupling_matrix_summary_determinism() -> None:
+    tokenizer = FrequencyTokenizerV1()
+    tokens = tokenizer.tokenize("alpha beta gamma alpha beta", domain="text").tokens
+
+    c1 = build_coupling_matrix_summary(tokens, window=4)
+    c2 = build_coupling_matrix_summary(tokens, window=4)
+
+    assert c1 == c2
+    assert c1.nnz > 0
+    assert 0.0 <= c1.density <= 1.0
+    assert c1.spectral_radius >= 0.0
+
+
+def test_coupling_matrix_metadata_fields_present() -> None:
+    tokenizer = FrequencyTokenizerV1()
+    tokens = tokenizer.tokenize("hello world hello", domain="text").tokens
+    summary = build_coupling_matrix_summary(tokens)
+    metadata = coupling_matrix_metadata(summary)
+
+    assert int(metadata["coupling_matrix_dim"]) == summary.dimension
+    assert int(metadata["coupling_matrix_nnz"]) == summary.nnz
+    assert float(metadata["coupling_matrix_density"]) == summary.density
+    assert float(metadata["coupling_matrix_spectral_radius"]) == summary.spectral_radius
+    assert metadata["coupling_matrix_hash"] == summary.matrix_hash

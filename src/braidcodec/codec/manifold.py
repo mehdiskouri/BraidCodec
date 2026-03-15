@@ -73,6 +73,17 @@ class ManifoldState:
     state_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class CouplingMatrixSummary:
+    """Deterministic summary over token coupling matrix statistics."""
+
+    dimension: int
+    nnz: int
+    density: float
+    spectral_radius: float
+    matrix_hash: str
+
+
 def _layer_index(token: FrequencyToken, *, layer_count: int) -> int:
     payload = (
         f"{token.token_class}|{token.phoneme_tag or '-'}|{token.bin_index}|{token.value}"
@@ -247,4 +258,69 @@ def manifold_metadata(state: ManifoldState) -> dict[str, str]:
         "manifold_layer_count": str(state.layer_count),
         "manifold_state_hash": state.state_hash,
         "manifold_latent_dim": str(len(state.global_vector)),
+    }
+
+
+def build_coupling_matrix_summary(
+    tokens: tuple[FrequencyToken, ...],
+    *,
+    window: int = 4,
+    matrix_dim: int = 128,
+) -> CouplingMatrixSummary:
+    """Build deterministic token coupling matrix summary.
+
+    Matrix cells count local co-occurrence of token frequency bins within a
+    bounded context window. This provides NNZ and spectral diagnostics that can
+    be reused by compact reconstructive codec selection.
+    """
+    if window < 1:
+        raise ValueError("window must be >= 1")
+    if matrix_dim < 2:
+        raise ValueError("matrix_dim must be >= 2")
+
+    mat = np.zeros((matrix_dim, matrix_dim), dtype=np.float64)
+    n = len(tokens)
+    for i in range(n):
+        src = int(tokens[i].bin_index) % matrix_dim
+        j_end = min(i + window + 1, n)
+        for j in range(i + 1, j_end):
+            dst = int(tokens[j].bin_index) % matrix_dim
+            w = 1.0 / float(j - i)
+            mat[src, dst] += w
+            mat[dst, src] += w
+
+    nnz = int(np.count_nonzero(mat))
+    density = float(nnz / float(matrix_dim * matrix_dim))
+
+    if nnz == 0:
+        spectral_radius = 0.0
+    else:
+        vec = np.full(matrix_dim, 1.0 / np.sqrt(float(matrix_dim)), dtype=np.float64)
+        for _ in range(12):
+            nxt = mat @ vec
+            norm = float(np.linalg.norm(nxt))
+            if norm <= 1e-12:
+                vec = nxt
+                break
+            vec = nxt / norm
+        spectral_radius = float(np.linalg.norm(mat @ vec))
+
+    matrix_hash = blake3.blake3(mat.tobytes(order="C")).hexdigest()
+    return CouplingMatrixSummary(
+        dimension=matrix_dim,
+        nnz=nnz,
+        density=density,
+        spectral_radius=spectral_radius,
+        matrix_hash=matrix_hash,
+    )
+
+
+def coupling_matrix_metadata(summary: CouplingMatrixSummary) -> dict[str, str]:
+    """Serialize coupling matrix summary into reconstructive metadata fields."""
+    return {
+        "coupling_matrix_dim": str(summary.dimension),
+        "coupling_matrix_nnz": str(summary.nnz),
+        "coupling_matrix_density": f"{summary.density:.17g}",
+        "coupling_matrix_spectral_radius": f"{summary.spectral_radius:.17g}",
+        "coupling_matrix_hash": summary.matrix_hash,
     }

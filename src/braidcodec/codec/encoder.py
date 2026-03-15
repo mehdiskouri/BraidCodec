@@ -31,9 +31,11 @@ from braidcodec.codec.chunker import (
     compute_block_size,
 )
 from braidcodec.codec.manifold import (
-    HypergraphModel,
+    CouplingMatrixSummary,
     ManifoldState,
+    build_coupling_matrix_summary,
     build_deterministic_hypergraph,
+    coupling_matrix_metadata,
     fit_compact_manifold_state,
     manifold_metadata,
     manifold_seed_vector,
@@ -439,26 +441,20 @@ def encode(
 
 def _build_reconstructive_fidelity_bundle(
     *,
-    graph: HypergraphModel,
     state: ManifoldState,
     fixedpoint: FixedPointResult,
+    coupling: CouplingMatrixSummary,
 ) -> dict[str, str]:
     """Build lightweight fidelity object metrics for reconstructive streams.
 
     These are deterministic scalar proxies that expose energy/topology/coherence
     style diagnostics in metadata without changing decode authority gates.
     """
-    layers = graph.layers
     layer_vectors = state.layer_vectors
     global_vec = state.global_vector
     diag = fixedpoint.diagnostics
 
-    topology_proxy = 0.0
-    if layers:
-        topology_proxy = float(
-            sum(float(getattr(layer, "unique_bin_count", 0)) for layer in layers)
-            / max(len(layers), 1)
-        )
+    topology_proxy = float(coupling.nnz) if coupling.nnz > 0 else 0.0
 
     energy_proxy = 0.0
     if layer_vectors:
@@ -539,6 +535,7 @@ def _build_reconstructive_metadata(
     normalized = normalizer.normalize_tokens(tokenized.tokens)
 
     graph = build_deterministic_hypergraph(tokenized.tokens)
+    coupling = build_coupling_matrix_summary(tokenized.tokens)
     state = fit_compact_manifold_state(normalized.points, graph)
 
     seed = manifold_seed_vector(state)
@@ -550,15 +547,16 @@ def _build_reconstructive_metadata(
     fp = iterate_fixedpoint(seed)
 
     fidelity_bundle = _build_reconstructive_fidelity_bundle(
-        graph=graph,
         state=state,
         fixedpoint=fp,
+        coupling=coupling,
     )
 
     metadata: dict[str, str] = {
         **tokenized.metadata,
         **normalized.metadata,
         **manifold_metadata(state),
+        **coupling_matrix_metadata(coupling),
         "reconstructive_token_count": str(len(tokenized.tokens)),
         "reconstructive_graph_hash": graph.graph_hash,
         "km_residual_max": f"{fp.diagnostics.residual_max:.17g}",
@@ -586,7 +584,12 @@ def _build_reconstructive_metadata(
     else:
         program_source_text = tokenized.canonical_text
 
-    compact_program = fit_reconstructive_program(program_source_text, domain_kind=domain)
+    compact_program = fit_reconstructive_program(
+        program_source_text,
+        domain_kind=domain,
+        coupling_density=coupling.density,
+        coupling_spectral_radius=coupling.spectral_radius,
+    )
     metadata.update(compact_program)
     full_metadata = {"preprocessing_mode": "reconstructive", **metadata}
     validate_reconstructive_metadata(full_metadata)
