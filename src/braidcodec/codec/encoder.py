@@ -589,6 +589,7 @@ def _build_reconstructive_metadata(
         domain_kind=domain,
         coupling_density=coupling.density,
         coupling_spectral_radius=coupling.spectral_radius,
+        coupling_nnz=coupling.nnz,
     )
     metadata.update(compact_program)
     full_metadata = {"preprocessing_mode": "reconstructive", **metadata}

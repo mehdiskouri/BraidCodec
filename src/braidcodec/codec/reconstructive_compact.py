@@ -56,16 +56,18 @@ def _build_spectral_predictor(
     *,
     coupling_density: float,
     coupling_spectral_radius: float,
+    coupling_nnz: int,
 ) -> tuple[bytes, dict[str, int]]:
     """Build deterministic byte predictor stream from coupling features."""
     q_density = round(max(0.0, min(coupling_density, 1.0)) * 65535.0)
     q_radius = round(max(0.0, min(coupling_spectral_radius, 1_000_000.0)))
+    q_nnz = round(max(float(coupling_nnz), 0.0) ** 0.5)
 
-    seed = (q_density ^ ((q_radius * 131) & 0xFF) ^ (length & 0xFF)) & 0xFF
+    seed = (q_density ^ ((q_radius * 131) & 0xFF) ^ (length & 0xFF) ^ (q_nnz & 0xFF)) & 0xFF
     a = ((q_density % 127) * 2 + 1) & 0xFF
     if a == 0:
         a = 1
-    b = ((q_radius % 251) + 1) & 0xFF
+    b = ((q_radius % 251) + 1 + (q_nnz % 29)) & 0xFF
     if b == 0:
         b = 1
 
@@ -75,7 +77,7 @@ def _build_spectral_predictor(
     for i in range(1, length):
         out[i] = (a * out[i - 1] + b + (i & 0xFF)) & 0xFF
 
-    return bytes(out), {"seed": seed, "a": a, "b": b}
+    return bytes(out), {"seed": seed, "a": a, "b": b, "nnz_q": q_nnz}
 
 
 def _fit_best_segment_codec(
@@ -83,6 +85,7 @@ def _fit_best_segment_codec(
     *,
     coupling_density: float,
     coupling_spectral_radius: float,
+    coupling_nnz: int,
 ) -> tuple[str, str, bytes, dict[str, int]]:
     """Return best (predictor, codec, compressed_residual, predictor_params)."""
     predictors: list[tuple[str, bytes, dict[str, int]]] = []
@@ -98,11 +101,13 @@ def _fit_best_segment_codec(
         len(source),
         coupling_density=coupling_density,
         coupling_spectral_radius=coupling_spectral_radius,
+        coupling_nnz=coupling_nnz,
     )
     predictors.append(("spectral-byte-v1", spectral_pred, spectral_params))
 
     codecs = ["zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"]
-    if coupling_density > 0.08 or coupling_spectral_radius > 25.0:
+    nnz_signal = coupling_nnz / max(len(source), 1)
+    if coupling_density > 0.08 or coupling_spectral_radius > 25.0 or nnz_signal > 8.0:
         codecs = ["bz2-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
 
     best_predictor = "zero-v1"
@@ -194,12 +199,14 @@ def fit_reconstructive_program(
     domain_kind: DomainKind,
     coupling_density: float | None = None,
     coupling_spectral_radius: float | None = None,
+    coupling_nnz: int | None = None,
 ) -> dict[str, str]:
     """Fit a compact deterministic reconstruction program for canonical text."""
     def _latent_residual_program(raw_text: str, *, domain: DomainKind) -> dict[str, str]:
         source = raw_text.encode("utf-8")
         c_density = float(coupling_density or 0.0)
         c_radius = float(coupling_spectral_radius or 0.0)
+        c_nnz = int(coupling_nnz or 0)
 
         (
             best_predictor,
@@ -210,6 +217,7 @@ def fit_reconstructive_program(
             source,
             coupling_density=c_density,
             coupling_spectral_radius=c_radius,
+            coupling_nnz=c_nnz,
         )
 
         payload_v2 = {
@@ -228,10 +236,12 @@ def fit_reconstructive_program(
             chunk = source[start : start + segment_size]
             cp = c_density * (1.0 + ((start // max(segment_size, 1)) % 3) * 0.05)
             cr = c_radius * (1.0 + ((start // max(segment_size, 1)) % 2) * 0.03)
+            cn = max(0, round(c_nnz * (len(chunk) / max(len(source), 1))))
             predictor, codec, compressed, params = _fit_best_segment_codec(
                 chunk,
                 coupling_density=cp,
                 coupling_spectral_radius=cr,
+                coupling_nnz=cn,
             )
             segments.append(
                 {
