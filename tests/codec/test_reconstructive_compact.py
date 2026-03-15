@@ -79,11 +79,13 @@ def test_fit_reconstructive_program_emits_base85_residual_payload() -> None:
     payload = json.loads(fitted["reconstructive_program_payload"])
 
     if fitted["reconstructive_program_type"] == "latent-residual-v2":
-        assert isinstance(payload.get("residual_b85"), str)
-        assert payload.get("residual_b85")
+        residual = payload.get("residual_b85", payload.get("r85"))
+        assert isinstance(residual, str)
+        assert residual
     elif fitted["reconstructive_program_type"] == "latent-residual-v3":
-        segments = payload.get("segments", [])
+        segments = payload.get("segments", payload.get("s", []))
         assert isinstance(segments, list)
         assert segments
-        assert isinstance(segments[0].get("residual_b85"), str)
-        assert segments[0].get("residual_b85")
+        residual = segments[0].get("residual_b85", segments[0].get("r85"))
+        assert isinstance(residual, str)
+        assert residual

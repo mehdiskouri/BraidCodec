@@ -70,14 +70,14 @@ def _encode_residual_blob(data: bytes) -> str:
 
 def _decode_residual_blob(program: dict[str, object]) -> bytes:
     """Decode residual bytes from payload (base85 preferred, base64 legacy)."""
-    raw_b85 = program.get("residual_b85")
+    raw_b85 = program.get("residual_b85", program.get("r85"))
     if isinstance(raw_b85, str) and raw_b85:
         try:
             return base64.b85decode(raw_b85.encode("ascii"))
         except Exception as exc:
             raise FormatError("Invalid latent residual base85 payload") from exc
 
-    raw_b64 = program.get("residual_b64")
+    raw_b64 = program.get("residual_b64", program.get("r64"))
     if isinstance(raw_b64, str) and raw_b64:
         try:
             return base64.b64decode(raw_b64.encode("ascii"))
@@ -270,13 +270,14 @@ def fit_reconstructive_program(
         )
 
         payload_v2 = {
-            "domain_kind": domain,
-            "predictor": best_predictor,
-            "codec": best_codec,
-            "original_length": len(source),
-            "predictor_params": best_predictor_params,
-            "residual_b85": _encode_residual_blob(best_compressed),
+            "d": domain,
+            "p": best_predictor,
+            "c": best_codec,
+            "n": len(source),
+            "r85": _encode_residual_blob(best_compressed),
         }
+        if best_predictor_params:
+            payload_v2["pp"] = best_predictor_params
 
         # Segment-pack v3: allow heterogeneous predictor/codec per chunk.
         segments: list[dict[str, object]] = []
@@ -298,20 +299,21 @@ def fit_reconstructive_program(
             )
             segments.append(
                 {
-                    "offset": start,
-                    "length": len(chunk),
-                    "predictor": predictor,
-                    "codec": codec,
-                    "predictor_params": params,
-                    "residual_b85": _encode_residual_blob(compressed),
+                    "o": start,
+                    "l": len(chunk),
+                    "p": predictor,
+                    "c": codec,
+                    "r85": _encode_residual_blob(compressed),
                 }
             )
+            if params:
+                segments[-1]["pp"] = params
 
         payload_v3 = {
-            "domain_kind": domain,
-            "segment_size": segment_size,
-            "original_length": len(source),
-            "segments": segments,
+            "d": domain,
+            "ss": segment_size,
+            "n": len(source),
+            "s": segments,
         }
 
         payload_v2_json = json.dumps(payload_v2, sort_keys=True, separators=(",", ":"))
@@ -467,9 +469,9 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         return raw_json.encode("utf-8")
 
     if program_type in {"latent-residual-v1", "latent-residual-v2"}:
-        predictor = str(program.get("predictor", ""))
-        codec = str(program.get("codec", ""))
-        original_length = int(program.get("original_length", -1))
+        predictor = str(program.get("predictor", program.get("p", "")))
+        codec = str(program.get("codec", program.get("c", "")))
+        original_length = int(program.get("original_length", program.get("n", -1)))
         if predictor not in {"zero-v1", "prev-byte-v1", "spectral-byte-v1"}:
             raise FormatError("Unsupported latent residual predictor")
         if codec not in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}:
@@ -486,7 +488,7 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         if len(residual) != original_length:
             raise FormatError("Latent residual length mismatch")
 
-        params_obj_raw = program.get("predictor_params", {})
+        params_obj_raw = program.get("predictor_params", program.get("pp", {}))
         params_obj = params_obj_raw if isinstance(params_obj_raw, dict) else {}
         return _decode_residual_with_predictor(
             predictor=predictor,
@@ -496,8 +498,8 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         )
 
     if program_type == "latent-residual-v3":
-        original_length = int(program.get("original_length", -1))
-        segments_obj = program.get("segments", [])
+        original_length = int(program.get("original_length", program.get("n", -1)))
+        segments_obj = program.get("segments", program.get("s", []))
         if original_length < 0 or not isinstance(segments_obj, list):
             raise FormatError("Invalid latent residual v3 parameters")
 
@@ -506,11 +508,15 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         for segment in segments_obj:
             if not isinstance(segment, dict):
                 raise FormatError("Invalid latent residual v3 segment")
-            offset = int(segment.get("offset", -1))
-            length = int(segment.get("length", -1))
-            predictor = str(segment.get("predictor", ""))
-            codec = str(segment.get("codec", ""))
-            params_obj_raw = segment.get("predictor_params", {})
+            raw_offset = segment.get("offset", segment.get("o", -1))
+            raw_length = segment.get("length", segment.get("l", -1))
+            if not isinstance(raw_offset, int | str) or not isinstance(raw_length, int | str):
+                raise FormatError("Invalid latent residual v3 segment layout")
+            offset = int(raw_offset)
+            length = int(raw_length)
+            predictor = str(segment.get("predictor", segment.get("p", "")))
+            codec = str(segment.get("codec", segment.get("c", "")))
+            params_obj_raw = segment.get("predictor_params", segment.get("pp", {}))
             params_obj = params_obj_raw if isinstance(params_obj_raw, dict) else {}
 
             if offset != cursor or length < 0:

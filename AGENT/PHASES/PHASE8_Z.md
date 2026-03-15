@@ -48,6 +48,11 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 - Post-Morton benchmark on the same subset/config preserved the base85 gain plateau (`wire=60530`, `h5=79019`) with exact fidelity and valid verification, establishing no-regression while broadening the adaptive search signal.
 - Reintegrated `nnz_bits` into topology synthesis/recovery v2 (with Morton retained): encoder now propagates per-block `topology_nnz_bits` through v2 transforms, and decoder/compressor/integrity v2 recovery paths consume the same `nnz_bits` signal.
 - Compatibility status: full type/lint/tests remain green; reconstructive benchmark remained stable at the improved envelope baseline (`wire=60530`, `h5=79019`, exact decode + verify valid).
+- Added compact-key latent residual payload layout (short aliases for predictor/codec/length/segment fields) with backward-compatible decode aliases for previous key names.
+- Post compact-key benchmark on the same subset/config yielded an incremental additional gain while preserving fidelity:
+	- Wire container: `60461` bytes (`-52.77%` vs input), improved from `60530`.
+	- HDF5 container: `78946` bytes (`-38.33%` vs input), improved from `79019`.
+	- Program remained `latent-residual-v2`; exact decode and verify validity unchanged.
 
 **Remaining non-binary parity gaps**
 - Full Julia parity is still pending: current compact replay is scenario-constrained (`repeat-text-v1`, `logs-seq-v1`, `json-linear-items-v1`, `json-literal-v1`) rather than a general latent-manifold projection for arbitrary Text/JSON/Logs.

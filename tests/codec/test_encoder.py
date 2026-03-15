@@ -439,15 +439,19 @@ class TestEncodePreprocessingModes:
         }
         program_payload = json.loads(payload["reconstructive_program_payload"])
         if payload["reconstructive_program_type"] == "latent-residual-v2":
-            assert program_payload["predictor"] in {
+            predictor = program_payload.get("predictor", program_payload.get("p"))
+            codec = program_payload.get("codec", program_payload.get("c"))
+            assert predictor in {
                 "zero-v1",
                 "prev-byte-v1",
                 "spectral-byte-v1",
             }
-            assert program_payload["codec"] in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}
+            assert codec in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}
         else:
-            assert isinstance(program_payload["segments"], list)
-            assert int(program_payload["original_length"]) == len(data)
+            segments = program_payload.get("segments", program_payload.get("s"))
+            original_length = program_payload.get("original_length", program_payload.get("n"))
+            assert isinstance(segments, list)
+            assert int(original_length) == len(data)
 
     def test_reconstructive_mode_keeps_repeat_program_for_periodic_text(self) -> None:
         key = _make_key()
