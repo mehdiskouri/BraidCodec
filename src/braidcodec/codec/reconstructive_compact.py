@@ -41,6 +41,16 @@ def _compress_by_codec(codec_name: str, data: bytes) -> bytes:
     raise FormatError("Unsupported latent residual codec")
 
 
+def _decompress_by_codec(codec_name: str, data: bytes) -> bytes:
+    if codec_name == "zlib-xor-v1":
+        return zlib.decompress(data)
+    if codec_name == "bz2-xor-v1":
+        return bz2.decompress(data)
+    if codec_name == "lzma-xor-v1":
+        return lzma.decompress(data)
+    raise FormatError("Unsupported latent residual codec")
+
+
 def _build_spectral_predictor(
     length: int,
     *,
@@ -68,6 +78,102 @@ def _build_spectral_predictor(
     return bytes(out), {"seed": seed, "a": a, "b": b}
 
 
+def _fit_best_segment_codec(
+    source: bytes,
+    *,
+    coupling_density: float,
+    coupling_spectral_radius: float,
+) -> tuple[str, str, bytes, dict[str, int]]:
+    """Return best (predictor, codec, compressed_residual, predictor_params)."""
+    predictors: list[tuple[str, bytes, dict[str, int]]] = []
+
+    predictors.append(("zero-v1", bytes(len(source)), {}))
+
+    prev_pred = bytearray(len(source))
+    for i in range(1, len(source)):
+        prev_pred[i] = source[i - 1]
+    predictors.append(("prev-byte-v1", bytes(prev_pred), {}))
+
+    spectral_pred, spectral_params = _build_spectral_predictor(
+        len(source),
+        coupling_density=coupling_density,
+        coupling_spectral_radius=coupling_spectral_radius,
+    )
+    predictors.append(("spectral-byte-v1", spectral_pred, spectral_params))
+
+    codecs = ["zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"]
+    if coupling_density > 0.08 or coupling_spectral_radius > 25.0:
+        codecs = ["bz2-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
+
+    best_predictor = "zero-v1"
+    best_codec = "zlib-xor-v1"
+    best_compressed = b""
+    best_predictor_params: dict[str, int] = {}
+    best_len: int | None = None
+
+    for predictor_name, predicted, predictor_params in predictors:
+        residual = bytes(s ^ p for s, p in zip(source, predicted, strict=False))
+        for codec_name in codecs:
+            compressed = _compress_by_codec(codec_name, residual)
+            clen = len(compressed)
+            if best_len is None or clen < best_len:
+                best_len = clen
+                best_predictor = predictor_name
+                best_codec = codec_name
+                best_compressed = compressed
+                best_predictor_params = predictor_params
+
+    return best_predictor, best_codec, best_compressed, best_predictor_params
+
+
+def _decode_residual_with_predictor(
+    *,
+    predictor: str,
+    residual: bytes,
+    original_length: int,
+    predictor_params: dict[str, object] | None = None,
+) -> bytes:
+    if predictor == "zero-v1":
+        return residual
+
+    if predictor == "spectral-byte-v1":
+        params_obj = predictor_params or {}
+        try:
+            raw_seed = params_obj.get("seed", -1)
+            raw_a = params_obj.get("a", -1)
+            raw_b = params_obj.get("b", -1)
+            if not isinstance(raw_seed, int | str):
+                raise TypeError
+            if not isinstance(raw_a, int | str):
+                raise TypeError
+            if not isinstance(raw_b, int | str):
+                raise TypeError
+            seed = int(raw_seed)
+            a = int(raw_a)
+            b = int(raw_b)
+        except (TypeError, ValueError) as exc:
+            raise FormatError("Invalid spectral predictor params") from exc
+        if not (0 <= seed <= 255 and 0 <= a <= 255 and 0 <= b <= 255):
+            raise FormatError("Invalid spectral predictor params")
+
+        pred = bytearray(original_length)
+        if original_length > 0:
+            pred[0] = seed
+        for i in range(1, original_length):
+            pred[i] = (a * pred[i - 1] + b + (i & 0xFF)) & 0xFF
+        return bytes(r ^ p for r, p in zip(residual, pred, strict=False))
+
+    if predictor == "prev-byte-v1":
+        out_buf = bytearray(original_length)
+        if original_length > 0:
+            out_buf[0] = residual[0]
+        for i in range(1, original_length):
+            out_buf[i] = residual[i] ^ out_buf[i - 1]
+        return bytes(out_buf)
+
+    raise FormatError("Unsupported latent residual predictor")
+
+
 def _smallest_repeat_unit(text: str) -> tuple[str, int] | None:
     n = len(text)
     if n == 0:
@@ -92,66 +198,71 @@ def fit_reconstructive_program(
     """Fit a compact deterministic reconstruction program for canonical text."""
     def _latent_residual_program(raw_text: str, *, domain: DomainKind) -> dict[str, str]:
         source = raw_text.encode("utf-8")
+        c_density = float(coupling_density or 0.0)
+        c_radius = float(coupling_spectral_radius or 0.0)
 
-        predictors: list[tuple[str, bytes]] = []
-
-        # Zero predictor: baseline residual is the raw byte stream.
-        predictors.append(("zero-v1", bytes(len(source))))
-
-        # Previous-byte predictor captures local byte continuity common in text.
-        prev_pred = bytearray(len(source))
-        for i in range(1, len(source)):
-            prev_pred[i] = source[i - 1]
-        predictors.append(("prev-byte-v1", bytes(prev_pred)))
-
-        spectral_pred, spectral_params = _build_spectral_predictor(
-            len(source),
-            coupling_density=float(coupling_density or 0.0),
-            coupling_spectral_radius=float(coupling_spectral_radius or 0.0),
+        (
+            best_predictor,
+            best_codec,
+            best_compressed,
+            best_predictor_params,
+        ) = _fit_best_segment_codec(
+            source,
+            coupling_density=c_density,
+            coupling_spectral_radius=c_radius,
         )
-        predictors.append(("spectral-byte-v1", spectral_pred))
 
-        best_predictor = "zero-v1"
-        best_codec = "zlib-xor-v1"
-        best_compressed = b""
-        best_predictor_params: dict[str, int] = {}
-        best_len: int | None = None
+        payload_v2 = {
+            "domain_kind": domain,
+            "predictor": best_predictor,
+            "codec": best_codec,
+            "original_length": len(source),
+            "predictor_params": best_predictor_params,
+            "residual_b64": base64.b64encode(best_compressed).decode("ascii"),
+        }
 
-        codecs = ["zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"]
+        # Segment-pack v3: allow heterogeneous predictor/codec per chunk.
+        segments: list[dict[str, object]] = []
+        segment_size = 32768 if len(source) >= 65536 else 16384
+        for start in range(0, len(source), segment_size):
+            chunk = source[start : start + segment_size]
+            cp = c_density * (1.0 + ((start // max(segment_size, 1)) % 3) * 0.05)
+            cr = c_radius * (1.0 + ((start // max(segment_size, 1)) % 2) * 0.03)
+            predictor, codec, compressed, params = _fit_best_segment_codec(
+                chunk,
+                coupling_density=cp,
+                coupling_spectral_radius=cr,
+            )
+            segments.append(
+                {
+                    "offset": start,
+                    "length": len(chunk),
+                    "predictor": predictor,
+                    "codec": codec,
+                    "predictor_params": params,
+                    "residual_b64": base64.b64encode(compressed).decode("ascii"),
+                }
+            )
 
-        # Coupling-aware ordering: stronger long-range coupling often benefits
-        # from heavier dictionary codecs first.
-        if (coupling_density or 0.0) > 0.08 or (coupling_spectral_radius or 0.0) > 25.0:
-            codecs = ["bz2-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
+        payload_v3 = {
+            "domain_kind": domain,
+            "segment_size": segment_size,
+            "original_length": len(source),
+            "segments": segments,
+        }
 
-        for predictor_name, predicted in predictors:
-            residual = bytes(s ^ p for s, p in zip(source, predicted, strict=False))
-            for codec_name in codecs:
-                compressed = _compress_by_codec(codec_name, residual)
-                clen = len(compressed)
-                if best_len is None or clen < best_len:
-                    best_len = clen
-                    best_predictor = predictor_name
-                    best_codec = codec_name
-                    best_compressed = compressed
-                    best_predictor_params = (
-                        spectral_params if predictor_name == "spectral-byte-v1" else {}
-                    )
+        payload_v2_json = json.dumps(payload_v2, sort_keys=True, separators=(",", ":"))
+        payload_v3_json = json.dumps(payload_v3, sort_keys=True, separators=(",", ":"))
+
+        if len(payload_v3_json) < len(payload_v2_json):
+            return {
+                "reconstructive_program_type": "latent-residual-v3",
+                "reconstructive_program_payload": payload_v3_json,
+            }
 
         return {
             "reconstructive_program_type": "latent-residual-v2",
-            "reconstructive_program_payload": json.dumps(
-                {
-                    "domain_kind": domain,
-                    "predictor": best_predictor,
-                    "codec": best_codec,
-                    "original_length": len(source),
-                    "predictor_params": best_predictor_params,
-                    "residual_b64": base64.b64encode(best_compressed).decode("ascii"),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
+            "reconstructive_program_payload": payload_v2_json,
         }
 
     if domain_kind == "text":
@@ -306,51 +417,67 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
 
         try:
             compressed = base64.b64decode(residual_b64.encode("ascii"))
-            if codec == "zlib-xor-v1":
-                residual = zlib.decompress(compressed)
-            elif codec == "bz2-xor-v1":
-                residual = bz2.decompress(compressed)
-            else:
-                residual = lzma.decompress(compressed)
+            residual = _decompress_by_codec(codec, compressed)
         except Exception as exc:
             raise FormatError("Invalid latent residual payload encoding") from exc
 
         if len(residual) != original_length:
             raise FormatError("Latent residual length mismatch")
 
-        if predictor == "zero-v1":
-            # predictor=zero-v1 => output bytes are residual bytes directly.
-            return residual
+        params_obj_raw = program.get("predictor_params", {})
+        params_obj = params_obj_raw if isinstance(params_obj_raw, dict) else {}
+        return _decode_residual_with_predictor(
+            predictor=predictor,
+            residual=residual,
+            original_length=original_length,
+            predictor_params=params_obj,
+        )
 
-        if predictor == "spectral-byte-v1":
-            params_obj = program.get("predictor_params", {})
-            if not isinstance(params_obj, dict):
-                raise FormatError("Invalid spectral predictor params")
+    if program_type == "latent-residual-v3":
+        original_length = int(program.get("original_length", -1))
+        segments_obj = program.get("segments", [])
+        if original_length < 0 or not isinstance(segments_obj, list):
+            raise FormatError("Invalid latent residual v3 parameters")
+
+        out = bytearray(original_length)
+        cursor = 0
+        for segment in segments_obj:
+            if not isinstance(segment, dict):
+                raise FormatError("Invalid latent residual v3 segment")
+            offset = int(segment.get("offset", -1))
+            length = int(segment.get("length", -1))
+            predictor = str(segment.get("predictor", ""))
+            codec = str(segment.get("codec", ""))
+            residual_b64 = str(segment.get("residual_b64", ""))
+            params_obj_raw = segment.get("predictor_params", {})
+            params_obj = params_obj_raw if isinstance(params_obj_raw, dict) else {}
+
+            if offset != cursor or length < 0:
+                raise FormatError("Invalid latent residual v3 segment layout")
+            if not residual_b64:
+                raise FormatError("Invalid latent residual v3 segment payload")
+
             try:
-                seed = int(params_obj.get("seed", -1))
-                a = int(params_obj.get("a", -1))
-                b = int(params_obj.get("b", -1))
-            except (TypeError, ValueError) as exc:
-                raise FormatError("Invalid spectral predictor params") from exc
-            if not (0 <= seed <= 255 and 0 <= a <= 255 and 0 <= b <= 255):
-                raise FormatError("Invalid spectral predictor params")
+                compressed = base64.b64decode(residual_b64.encode("ascii"))
+                residual = _decompress_by_codec(codec, compressed)
+            except Exception as exc:
+                raise FormatError("Invalid latent residual v3 segment encoding") from exc
 
-            pred = bytearray(original_length)
-            if original_length > 0:
-                pred[0] = seed
-            for i in range(1, original_length):
-                pred[i] = (a * pred[i - 1] + b + (i & 0xFF)) & 0xFF
+            if len(residual) != length:
+                raise FormatError("Latent residual v3 segment length mismatch")
 
-            reconstructed = bytes(r ^ p for r, p in zip(residual, pred, strict=False))
-            return reconstructed
+            decoded = _decode_residual_with_predictor(
+                predictor=predictor,
+                residual=residual,
+                original_length=length,
+                predictor_params=params_obj,
+            )
+            out[offset : offset + length] = decoded
+            cursor += length
 
-        # predictor=prev-byte-v1: source[i] = residual[i] XOR source[i-1]
-        out_buf = bytearray(original_length)
-        if original_length > 0:
-            out_buf[0] = residual[0]
-        for i in range(1, original_length):
-            out_buf[i] = residual[i] ^ out_buf[i - 1]
-        return bytes(out_buf)
+        if cursor != original_length:
+            raise FormatError("Latent residual v3 total length mismatch")
+        return bytes(out)
 
     if program_type == "logs-seq-v1":
         prefix = str(program.get("prefix", ""))

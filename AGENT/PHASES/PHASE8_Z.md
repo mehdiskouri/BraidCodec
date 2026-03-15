@@ -35,6 +35,8 @@ Deliver a deterministic `reconstructive` codec mode for `Text/JSON/Logs` that st
 - `program_type=latent-residual-v2`, bitwise exact decode + `verify.valid=True`.
 - Wire container: `64204` bytes (`-49.84%` vs input).
 - HDF5 container: `82693` bytes (`-35.40%` vs input).
+- Post `latent-residual-v3` segmented implementation benchmark (same subset/config) still selected `latent-residual-v2` as smaller serialized payload for this corpus slice; exact decode + verify validity unchanged.
+- `latent-residual-v3` path remains implemented, decode-compatible, and quality-gated for cases where segmented heterogeneous residual coding wins on payload size.
 
 **Remaining non-binary parity gaps**
 - Full Julia parity is still pending: current compact replay is scenario-constrained (`repeat-text-v1`, `logs-seq-v1`, `json-linear-items-v1`, `json-literal-v1`) rather than a general latent-manifold projection for arbitrary Text/JSON/Logs.
