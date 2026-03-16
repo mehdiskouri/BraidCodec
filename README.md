@@ -115,6 +115,23 @@ Exit codes: `0` OK, `1` integrity failure, `2` key mismatch, `3` format error, `
 
 Estimates assume serial encoding with `generators_per_block=32` on a single core. Parallelism scales near-linearly.
 
+## Public Showcase Benchmark
+
+Use the public-facing benchmark to compare on-disk footprint and reconstruction fidelity against traditional storage baselines (gzip, zlib, lzma) on a deterministic subset of project docs (Pile-like text corpus sample).
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark_public_showcase.py
+```
+
+Artifacts are written to `benchmarks/public_showcase/`:
+
+- `latest_results.json` and timestamped `showcase_*.json`
+- `latest_table.csv` and timestamped `showcase_*.csv`
+- `latest_report.md` and timestamped `showcase_*.md`
+- `latest_plot.html` and timestamped `showcase_*.html`
+
+This is intended for public demos where you want to show one reproducible run with exact reconstruction checks and compact footprint comparisons.
+
 ## Architecture
 
 ```
