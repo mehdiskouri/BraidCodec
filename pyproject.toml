@@ -26,11 +26,27 @@ dependencies = [
 [project.optional-dependencies]
 quantum = ["qiskit>=1.0"]
 cli = ["click>=8.0"]
+reconstructive_discovery = [
+    "pysindy>=2.1.0",
+    "sympy>=1.14.0",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+    "joblib>=1.5.3",
+]
+test = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-benchmark>=5.2.3",
+    "hypothesis>=6.151.9",
+    "click>=8.0",
+    "h5py>=3.13.0",
+]
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-benchmark>=5.2.3",
     "hypothesis>=6.151.9",
+    "h5py>=3.13.0",
     "mypy>=1.19.1",
     "ruff>=0.15.6",
     "pre-commit>=4.5.1",
@@ -79,7 +95,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --benchmark-disable --ignore=tests/benchmarks"
+# Run benchmarks explicitly: pytest tests/benchmarks/ --benchmark-enable -o 'python_files=bench_*.py'
 
 [tool.coverage.run]
 source = ["braidcodec"]

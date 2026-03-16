@@ -130,6 +130,13 @@ class BraidEquation:
 # =============================================================================
 
 
+# ── Matrix caches ────────────────────────────────────────────────────────
+# Keyed on (sector, inverse, theta_override) and (i, n, inverse, sector, theta)
+# respectively.  Entries are immutable once inserted.
+_r_matrix_cache: dict[tuple[str, bool, float | None], np.ndarray] = {}
+_gen_matrix_cache: dict[tuple[int, int, bool, str, float | None], np.ndarray] = {}
+
+
 def get_sector_r_matrix(
     sector: str,
     inverse: bool,
@@ -154,6 +161,11 @@ def get_sector_r_matrix(
     np.ndarray
         4×4 complex unitary matrix.
     """
+    cache_key = (sector, inverse, theta_override)
+    cached = _r_matrix_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     if theta_override is not None:
         theta = theta_override
     elif sector in ("Identity", "TSR"):
@@ -183,6 +195,7 @@ def get_sector_r_matrix(
         ],
         dtype=np.complex128,
     )
+    _r_matrix_cache[cache_key] = R
     return R
 
 
@@ -220,6 +233,11 @@ def get_braid_generator_matrix(
         msg = f"Generator index i={i} out of range [1, {n - 1}]"
         raise ValueError(msg)
 
+    cache_key = (i, n, inverse, sector, theta_override)
+    cached = _gen_matrix_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     d = 2
     R = get_sector_r_matrix(sector, inverse, theta_override=theta_override)
     I2 = np.eye(d, dtype=np.complex128)
@@ -237,6 +255,7 @@ def get_braid_generator_matrix(
     for _ in range(i + 1, n):
         result = np.asarray(np.kron(result, I2), dtype=np.complex128)
 
+    _gen_matrix_cache[cache_key] = result
     return result
 
 
@@ -259,15 +278,20 @@ def contract_braid_tensor(braid: BraidEquation) -> np.ndarray:
     n = braid.n_strands
     D = 2**n
 
-    result = np.eye(D, dtype=np.complex128)
-
     theta_ov = braid._sector_params.get("theta") if braid._sector_params else None
 
+    # Pre-build a local lookup: signed generator → cached matrix.
+    # Avoids abs()/comparison per iteration and reduces to int dict lookup.
+    gen_mats: dict[int, np.ndarray] = {}
     for gen in braid.generators:
-        i = abs(gen)
-        inv_flag = gen < 0
-        mat = get_braid_generator_matrix(i, n, inv_flag, braid.sector, theta_override=theta_ov)
-        result = mat @ result
+        if gen not in gen_mats:
+            gen_mats[gen] = get_braid_generator_matrix(
+                abs(gen), n, gen < 0, braid.sector, theta_override=theta_ov
+            )
+
+    result = np.eye(D, dtype=np.complex128)
+    for gen in braid.generators:
+        result = gen_mats[gen] @ result
 
     braid.braid_matrix = result
     return result
@@ -444,11 +468,83 @@ def count_loops_in_smoothing(n: int, gens: list[int], state: int) -> int:
     return n_loops
 
 
+# ── Cycle-count lookup table for vectorised Kauffman bracket ──────────────
+_cycle_lut_cache: dict[int, np.ndarray] = {}
+
+
+def _get_cycle_lut(n: int) -> np.ndarray:
+    """Return a LUT mapping permutation encoding → cycle count for n elements."""
+    lut = _cycle_lut_cache.get(n)
+    if lut is not None:
+        return lut
+    from itertools import permutations
+
+    lut = np.zeros(n**n, dtype=np.int32)
+    factors = [n ** (n - 1 - j) for j in range(n)]
+    for perm in permutations(range(n)):
+        key = sum(p * f for p, f in zip(perm, factors, strict=False))
+        visited = [False] * n
+        cycles = 0
+        for start in range(n):
+            if not visited[start]:
+                cycles += 1
+                cur = start
+                while not visited[cur]:
+                    visited[cur] = True
+                    cur = perm[cur]
+        lut[key] = cycles
+    _cycle_lut_cache[n] = lut
+    return lut
+
+
+def _kauffman_bracket_vectorized(
+    A: complex,
+    d: complex,
+    n: int,
+    gens: list[int],
+    m: int,
+) -> complex:
+    """Vectorised Kauffman bracket using numpy — O(m·2^m) with low constant."""
+    S = 1 << m
+    states = np.arange(S, dtype=np.int32)
+    gen_arr = np.array(gens, dtype=np.int32)
+
+    # a_power per state: (S,)
+    bits = (states[:, None] >> np.arange(m, dtype=np.int32)[None, :]) & 1
+    positive = gen_arr[None, :] > 0
+    a_powers = np.where(positive, np.where(bits == 0, 1, -1), np.where(bits == 0, -1, 1)).sum(
+        axis=1
+    )
+
+    # Connection swapping: track permutations for all states at once
+    connections = np.tile(np.arange(n, dtype=np.int32), (S, 1))
+    for idx in range(m):
+        g = gens[idx]
+        i = abs(g) - 1
+        bit = (states >> idx) & 1
+        do_swap = (bit == 1) if g > 0 else (bit == 0)
+        ci = connections[:, i].copy()
+        ci1 = connections[:, i + 1].copy()
+        connections[:, i] = np.where(do_swap, ci1, ci)
+        connections[:, i + 1] = np.where(do_swap, ci, ci1)
+
+    # Cycle count via pre-computed LUT
+    lut = _get_cycle_lut(n)
+    factors = np.array([n ** (n - 1 - j) for j in range(n)], dtype=np.int64)
+    perm_keys = (connections.astype(np.int64) * factors[None, :]).sum(axis=1)
+    n_loops = lut[perm_keys]
+
+    bracket = np.sum(A ** a_powers.astype(np.float64) * d ** (n_loops - 1).astype(np.float64))
+    return complex(bracket)
+
+
 def kauffman_bracket(braid: BraidEquation) -> complex:
     """Kauffman bracket ⟨L⟩ via state-sum model.
 
     Satisfies skein relation:
         ⟨crossing⟩ = A⟨0-smoothing⟩ + A⁻¹⟨1-smoothing⟩
+
+    Uses a vectorised numpy implementation for m ≤ 20 generators.
     """
     A = _get_effective_A(braid)
     n = braid.n_strands
@@ -460,6 +556,11 @@ def kauffman_bracket(braid: BraidEquation) -> complex:
         return d ** (n - 1)
 
     m = len(gens)
+
+    if m <= 20:
+        return _kauffman_bracket_vectorized(A, d, n, gens, m)
+
+    # Scalar fallback for very long braids (>2^20 states).
     bracket = 0.0 + 0.0j
 
     for state in range(1 << m):

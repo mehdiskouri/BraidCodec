@@ -11,8 +11,11 @@ Covers:
 from __future__ import annotations
 
 import struct
+import zlib
+from base64 import b85encode
 
 import blake3
+import msgpack
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -38,7 +41,13 @@ from braidcodec._exceptions import (
     VersionError,
     WritheError,
 )
-from braidcodec.codec.schema import EncodedBlock, EncodedStream
+from braidcodec.codec.schema import (
+    EncodedBlock,
+    EncodedStream,
+    compute_reconstructive_commitment_v3,
+    parse_reconstructive_payload_metadata,
+    validate_reconstructive_compact_transport_metadata,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Exception hierarchy tests
@@ -359,6 +368,105 @@ class TestEncodedBlockDictRoundTrip:
         assert rb.decode_generators == [1, 3, -1, 2]
         assert rb.effective_decode_generators == [1, 3, -1, 2]
 
+    def test_topology_fields_roundtrip(self) -> None:
+        block = EncodedBlock(
+            generators=[1, -2, 1],
+            n_strands=4,
+            sector="TSR",
+            writhe=0,
+            block_index=3,
+            original_length=6,
+            invariant_tier=3,
+            trace_real=1.5,
+            trace_imag=-0.25,
+            topology_layer_index=2,
+            topology_layer_n_chunks=7,
+            topology_nnz_bits=23,
+            topology_dt_scale=1.125,
+            topology_hash32=123456,
+            topology_density_fp=1200,
+            topology_centroid_fp=42000,
+            topology_variance_fp=900,
+            topology_morton_key=987654,
+            topology_commitment=123456789,
+        )
+        d = block.to_dict()
+        recovered = EncodedBlock.from_dict(d)  # type: ignore[arg-type]
+        assert recovered.topology_layer_index == 2
+        assert recovered.topology_layer_n_chunks == 7
+        assert recovered.topology_nnz_bits == 23
+        assert recovered.topology_dt_scale == 1.125
+        assert recovered.topology_hash32 == 123456
+        assert recovered.topology_density_fp == 1200
+        assert recovered.topology_centroid_fp == 42000
+        assert recovered.topology_variance_fp == 900
+        assert recovered.topology_morton_key == 987654
+        assert recovered.topology_commitment == 123456789
+
+
+class TestReconstructivePayloadMetadata:
+    def test_parse_compact_transport_payload_rejects_legacy_payload_only_metadata(self) -> None:
+        meta = {
+            "rp1": "{}",
+        }
+        with pytest.raises(FormatError, match="compact transport code"):
+            parse_reconstructive_payload_metadata(meta)
+
+    def test_parse_compact_transport_payload_from_folded_rt_tag(self) -> None:
+        meta = {
+            "rt": "ps1.jl1",
+            "rpb": '{"raw_json":"{}"}',
+        }
+        parsed = parse_reconstructive_payload_metadata(meta)
+        assert parsed["reconstructive_program_type"] == "json-literal-v1"
+        assert parsed["reconstructive_program_payload"] == '{"raw_json":"{}"}'
+
+    def test_parse_compact_transport_payload_from_reconstructive_header(self) -> None:
+        packed = b85encode(
+            zlib.compress(
+                msgpack.packb({"t": "ps1.jl1", "p": '{"raw_json":"{}"}'}, use_bin_type=True),
+                level=9,
+            )
+        ).decode("ascii")
+        meta = {
+            "rh": f"~rh85:{packed}",
+        }
+        parsed = parse_reconstructive_payload_metadata(meta)
+        assert parsed["reconstructive_program_type"] == "json-literal-v1"
+        assert parsed["reconstructive_program_payload"] == '{"raw_json":"{}"}'
+
+    def test_parse_compact_transport_payload_rejects_missing_inline_type(self) -> None:
+        meta = {
+            "rt": "ps1",
+            "rtt": "jl1",
+            "rpb": '{"raw_json":"{}"}',
+        }
+        with pytest.raises(FormatError, match="transport type"):
+            parse_reconstructive_payload_metadata(meta)
+
+    def test_validate_compact_transport_commitment_v3(self) -> None:
+        meta = {
+            "rt": "ps1.jl1",
+            "rpb": '{"raw_json":"{}"}',
+        }
+        blocks: tuple[EncodedBlock, ...] = tuple()
+        meta["rc3"] = compute_reconstructive_commitment_v3(
+            transport_code="ps1.jl1",
+            blocks=blocks,
+            program_sidechannel_blob='{"raw_json":"{}"}',
+        )
+        payload = validate_reconstructive_compact_transport_metadata(meta, blocks)
+        assert payload["reconstructive_program_type"] == "json-literal-v1"
+
+    def test_validate_compact_transport_commitment_v3_rejects_mismatch(self) -> None:
+        meta = {
+            "rt": "ps1.jl1",
+            "rpb": '{"raw_json":"{}"}',
+            "rc3": "0" * 64,
+        }
+        with pytest.raises(FormatError, match="commitment v3 mismatch"):
+            validate_reconstructive_compact_transport_metadata(meta, tuple())
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # EncodedStream round-trip tests
@@ -438,6 +546,12 @@ class TestEncodedStreamRoundTrip:
         stream = _make_stream()
         wire = stream.to_bytes()
         recovered = EncodedStream.from_bytes(wire)
+        assert recovered.version == 2
+
+    def test_version_1_backward_compatibility(self) -> None:
+        stream = _make_stream(version=1)
+        wire = stream.to_bytes()
+        recovered = EncodedStream.from_bytes(wire)
         assert recovered.version == 1
 
     def test_empty_blocks_list(self) -> None:
@@ -465,6 +579,42 @@ class TestEncodedStreamRoundTrip:
         wire = _make_stream().to_bytes()
         recovered = EncodedStream.from_bytes(memoryview(wire))
         assert recovered.n_strands == 4
+
+    def test_hdf5_roundtrip(self) -> None:
+        h5py = pytest.importorskip("h5py")
+        assert h5py is not None
+        stream = _make_stream(blocks=(_TIER1, _TIER2, _TIER3))
+        payload = stream.to_hdf5_bytes()
+        recovered = EncodedStream.from_hdf5_bytes(payload)
+        assert recovered.version == stream.version
+        assert recovered.n_strands == stream.n_strands
+        assert recovered.sector == stream.sector
+        assert recovered.total_bytes == stream.total_bytes
+        assert recovered.checksum == stream.checksum
+        assert recovered.metadata == stream.metadata
+        assert recovered.blocks == stream.blocks
+
+    def test_hdf5_is_more_compact_for_long_generators(self) -> None:
+        h5py = pytest.importorskip("h5py")
+        assert h5py is not None
+        long_block = EncodedBlock(
+            generators=[1 if i % 2 == 0 else -2 for i in range(120_000)],
+            n_strands=4,
+            sector="TSR",
+            writhe=0,
+            block_index=0,
+            original_length=8192,
+            invariant_tier=1,
+        )
+        stream = _make_stream(
+            blocks=(long_block,),
+            n_strands=4,
+            total_bytes=8192,
+            checksum=_make_checksum(b"x" * 8192),
+        )
+        wire = stream.to_bytes()
+        h5 = stream.to_hdf5_bytes()
+        assert len(h5) < len(wire)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

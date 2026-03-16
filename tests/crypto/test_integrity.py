@@ -54,12 +54,32 @@ class TestVerifyClean:
         stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
         result = verify(stream, key)
         assert result.fermion_passed is None
+        assert result.topology_passed is None
 
     def test_fermion_enabled_passes_clean(self) -> None:
         key = _make_key()
         stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
         result = verify(stream, key, fermion_check=True)
         assert result.fermion_passed is True
+        assert result.valid is True
+
+    def test_topology_enabled_passes_clean(self) -> None:
+        key = _make_key()
+        stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
+        result = verify(stream, key, topology_check=True)
+        assert result.topology_passed is True
+        assert result.valid is True
+
+    def test_topology_skips_legacy_mode(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"Hello",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="legacy",
+        )
+        result = verify(stream, key, topology_check=True)
+        assert result.topology_passed is None
         assert result.valid is True
 
     def test_tier_3_clean(self) -> None:
@@ -145,6 +165,114 @@ class TestVerifyCorruption:
         assert result.checksum_passed is False
         assert result.valid is False
 
+    def test_topology_corruption(self) -> None:
+        """Modified topology metadata fails topology channel only when enabled."""
+        key = _make_key()
+        stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
+        tampered = _tamper_block(stream, 0, topology_hash32=0)
+
+        result_no_topo = verify(tampered, key, topology_check=False)
+        assert result_no_topo.topology_passed is None
+
+        result_topo = verify(tampered, key, topology_check=True)
+        assert result_topo.topology_passed is False
+        assert result_topo.valid is False
+
+    def test_topology_morton_commitment_corruption(self) -> None:
+        key = _make_key()
+        stream = encode(b"Hello", key, generators_per_block=_K_SMALL)
+        tampered = _tamper_block(stream, 0, topology_morton_key=0, topology_commitment=0)
+        result_topo = verify(tampered, key, topology_check=True)
+        assert result_topo.topology_passed is False
+        assert result_topo.valid is False
+
+    def test_reconstructive_metadata_corruption(self) -> None:
+        """Missing compact sidechannel fails structural validation."""
+        key = _make_key()
+        stream = encode(
+            b"Hello reconstructive",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta.pop("rpb", None)
+        tampered = replace(stream, metadata=bad_meta)
+
+        result = verify(tampered, key)
+        assert result.structural_passed is False
+        assert result.valid is False
+        assert any("Reconstructive metadata invalid" in d for d in result.details)
+
+    def test_reconstructive_commitment_corruption(self) -> None:
+        """Corrupted reconstructive commitment fails structural validation."""
+        key = _make_key()
+        stream = encode(
+            b"Hello reconstructive",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta["rc3"] = "0" * 64
+        tampered = replace(stream, metadata=bad_meta)
+
+        result = verify(tampered, key)
+        assert result.structural_passed is False
+        assert result.valid is False
+        assert any("Reconstructive metadata invalid" in d for d in result.details)
+
+    def test_reconstructive_lean_payload_corruption(self) -> None:
+        """Lean payload tamper remains structurally valid but fails checksum."""
+        key = _make_key()
+        stream = encode(
+            b"Hello reconstructive",
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_compact_transport="lean",
+        )
+        bad_meta = dict(stream.metadata)
+        bad_meta["rpb"] = "not-json"
+        tampered = replace(stream, metadata=bad_meta)
+
+        result = verify(tampered, key)
+        assert result.structural_passed is True
+        assert result.checksum_passed is False
+        assert result.valid is False
+
+    def test_reconstructive_compact_transport_verifies_clean(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"A" * 512,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="enabled",
+        )
+        result = verify(stream, key)
+        assert result.valid is True
+        assert result.structural_passed is True
+        assert result.checksum_passed is True
+
+    def test_reconstructive_lean_transport_verifies_clean(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"A" * 512,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="lean",
+        )
+        result = verify(stream, key)
+        assert result.valid is True
+        assert result.structural_passed is True
+        assert result.checksum_passed is True
+
 
 # ── Structural short-circuit ──────────────────────────────────────────────
 
@@ -191,3 +319,64 @@ class TestVerifyAllSectors:
         stream = encode(b"Sector test", key, generators_per_block=_K_SMALL)
         result = verify(stream, key)
         assert result.valid is True
+
+
+# ── Edge-case coverage for per-channel functions ──────────────────────────
+
+
+class TestVerifyEdgeCases:
+    def test_tier2_missing_jones_value(self) -> None:
+        """Tier 2 block with jones=None → invariant check fails."""
+        from braidcodec.crypto.integrity import _check_invariant
+
+        key = _make_key()
+        stream = encode(b"\x01\x02", key, generators_per_block=_K_SMALL)
+        block = stream.blocks[0]
+        assert block.invariant_tier == 2
+        # Bypass __post_init__ by setting via object.__setattr__
+        bad_block = replace(block, jones_real=0.0, jones_imag=0.0)
+        object.__setattr__(bad_block, "jones_real", None)
+        object.__setattr__(bad_block, "jones_imag", None)
+        ok, msg = _check_invariant(bad_block, key.sector_params)
+        assert not ok
+        assert msg is not None and "Jones" in msg
+
+    def test_tier3_missing_trace_value(self) -> None:
+        """Tier 3 block with trace=None → invariant check fails."""
+        from braidcodec.crypto.integrity import _check_invariant
+
+        key = _make_key()
+        stream = encode(b"Hello, topology!", key, generators_per_block=_K_DEFAULT)
+        block = stream.blocks[0]
+        assert block.invariant_tier == 3
+        bad_block = replace(block, trace_real=0.0, trace_imag=0.0)
+        object.__setattr__(bad_block, "trace_real", None)
+        object.__setattr__(bad_block, "trace_imag", None)
+        ok, msg = _check_invariant(bad_block, key.sector_params)
+        assert not ok
+        assert msg is not None and "trace" in msg
+
+    def test_fermion_generator_exceeds_sites(self) -> None:
+        """Generator |g| > n_sites → fermion channel fails."""
+        key = _make_key(n_strands=3)
+        stream = encode(b"\x01", key, generators_per_block=_K_SMALL)
+        block = stream.blocks[0]
+        # Replace a generator with one that exceeds n_sites (n_strands - 1 = 2)
+        bad_gens = list(block.generators)
+        bad_gens[0] = 99  # way beyond n_sites
+        tampered = _tamper_block(stream, 0, generators=bad_gens)
+        result = verify(tampered, key, fermion_check=True)
+        # Structural check may catch this first, but fermion won't pass either
+        assert result.valid is False
+
+    def test_checksum_skipped_on_structural_fail(self) -> None:
+        """When structural fails → checksum channel skipped."""
+        key = _make_key()
+        stream = encode(b"\x01\x02", key, generators_per_block=_K_SMALL)
+        block = stream.blocks[0]
+        bad_gens = list(block.generators)
+        bad_gens[0] = key.n_strands
+        tampered = _tamper_block(stream, 0, generators=bad_gens)
+        result = verify(tampered, key)
+        assert result.checksum_passed is False
+        assert any("skipped" in d.lower() or "checksum" in d.lower() for d in result.details)

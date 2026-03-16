@@ -74,6 +74,26 @@ def _handle_error(ctx: click.Context, exc: Exception) -> int:
     raise exc
 
 
+def _failure_taxonomy_from_text(text: str) -> str:
+    """Map error/detail text to user-facing failure taxonomy."""
+    t = text.lower()
+    if "strict-gate-profile" in t:
+        return "strict-gate-profile-failure"
+    if "discovery required" in t or "discovery-required" in t:
+        return "discovery-required-failure"
+    if "contraction" in t:
+        return "contraction-failure"
+    if "convergence" in t or "residual gate" in t:
+        return "convergence-failure"
+    if "jones" in t or "trace" in t or "invariant" in t:
+        return "invariant-failure"
+    if "checksum" in t:
+        return "checksum-failure"
+    if "reconstructive" in t or "payload" in t or "commitment" in t:
+        return "reconstructive-contract-failure"
+    return "structural-failure"
+
+
 def _load_key(path: Path) -> BraidKey:
     """Read a key file."""
     return key_from_bytes(path.read_bytes())
@@ -81,7 +101,27 @@ def _load_key(path: Path) -> BraidKey:
 
 def _load_stream(path: Path) -> EncodedStream:
     """Read and deserialize an encoded file."""
-    return EncodedStream.from_bytes(path.read_bytes())
+    data = path.read_bytes()
+    if path.suffix.lower() in {".h5", ".hdf5"}:
+        return EncodedStream.from_hdf5_bytes(data)
+    if len(data) >= 8 and data[:8] == b"\x89HDF\r\n\x1a\n":
+        return EncodedStream.from_hdf5_bytes(data)
+    return EncodedStream.from_bytes(data)
+
+
+def _serialize_stream_for_container(stream: EncodedStream, container: str) -> tuple[bytes, str]:
+    """Serialize stream using requested container policy."""
+    if container == "wire":
+        return stream.to_bytes(), "wire"
+    if container == "hdf5":
+        return stream.to_hdf5_bytes(), "hdf5"
+    if container == "auto":
+        wire = stream.to_bytes()
+        hdf5 = stream.to_hdf5_bytes()
+        if len(hdf5) < len(wire):
+            return hdf5, "hdf5"
+        return wire, "wire"
+    raise FormatError(f"Unknown container policy: {container}")
 
 
 # ── CLI group ─────────────────────────────────────────────────────────────
@@ -140,6 +180,60 @@ def keygen(ctx: click.Context, sector: str, strands: int, output_path: str) -> N
     help="Compression level (0-2).",
 )
 @click.option("--workers", default=None, type=int, help="Parallel workers.")
+@click.option(
+    "--preprocessing-mode",
+    type=click.Choice(["topology", "legacy", "reconstructive"], case_sensitive=True),
+    default="topology",
+    show_default=True,
+    help="Encoding preprocessing mode.",
+)
+@click.option(
+    "--reconstructive-domain",
+    type=click.Choice(["text", "json", "logs"], case_sensitive=True),
+    default=None,
+    help="Optional reconstructive domain override.",
+)
+@click.option(
+    "--reconstructive-discovery",
+    type=click.Choice(["enabled", "disabled", "required"], case_sensitive=True),
+    default="enabled",
+    show_default=True,
+    help="Equation discovery mode for reconstructive preprocessing.",
+)
+@click.option(
+    "--reconstructive-compact-transport",
+    type=click.Choice(["enabled", "lean"], case_sensitive=True),
+    default="enabled",
+    show_default=True,
+    help="Compact transport policy for reconstructive mode.",
+)
+@click.option(
+    "--reconstructive-compact-audit-bundle",
+    is_flag=True,
+    default=False,
+    help="Include optional compact reconstructive audit sidecar metadata.",
+)
+@click.option(
+    "--reconstructive-library",
+    default=None,
+    type=click.Path(),
+    help="Optional path to persistent reconstructive equation library JSON.",
+)
+@click.option(
+    "--strict-gates",
+    "strict_gates_profile",
+    default="default-v1",
+    show_default=True,
+    help="Strict gate/discovery profile identifier.",
+)
+@click.option(
+    "--container",
+    "container_policy",
+    type=click.Choice(["auto", "wire", "hdf5"], case_sensitive=True),
+    default="auto",
+    show_default=True,
+    help="Output container policy.",
+)
 @click.pass_context
 def encode_cmd(
     ctx: click.Context,
@@ -150,6 +244,14 @@ def encode_cmd(
     strands: int,
     comp_level: int,
     workers: int | None,
+    preprocessing_mode: str,
+    reconstructive_domain: str | None,
+    reconstructive_discovery: str,
+    reconstructive_compact_transport: str,
+    reconstructive_compact_audit_bundle: bool,
+    reconstructive_library: str | None,
+    strict_gates_profile: str,
+    container_policy: str,
 ) -> None:
     """Encode a file into BraidCodec format."""
     try:
@@ -160,13 +262,33 @@ def encode_cmd(
             click.echo(f"Auto-generated key id: {key.key_id}", err=True)
 
         data = Path(input_file).read_bytes()
-        stream = encode(data, key, max_workers=workers)
+        stream = encode(
+            data,
+            key,
+            max_workers=workers,
+            preprocessing_mode=preprocessing_mode,
+            reconstructive_domain=reconstructive_domain,
+            reconstructive_discovery=reconstructive_discovery,
+            reconstructive_compact_transport=reconstructive_compact_transport,
+            reconstructive_compact_audit_bundle=reconstructive_compact_audit_bundle,
+            reconstructive_library_path=reconstructive_library,
+            reconstructive_strict_gate_profile=strict_gates_profile,
+        )
 
         if comp_level > 0:
             stream = compress(stream, key, level=comp_level)
 
-        Path(output_path).write_bytes(stream.to_bytes())
-        _echo(ctx, f"Encoded {len(data)} bytes → {output_path}")
+        out_path = Path(output_path)
+        if container_policy == "auto":
+            suffix = out_path.suffix.lower()
+            if suffix in {".h5", ".hdf5"}:
+                container_policy = "hdf5"
+            elif suffix == ".brdc":
+                container_policy = "wire"
+
+        payload, selected_container = _serialize_stream_for_container(stream, container_policy)
+        out_path.write_bytes(payload)
+        _echo(ctx, f"Encoded {len(data)} bytes → {output_path} (container: {selected_container})")
     except Exception as exc:
         ctx.exit(_handle_error(ctx, exc))
 
@@ -194,6 +316,10 @@ def decode_cmd(
         result = decode(stream, key)
         Path(output_path).write_bytes(result)
         _echo(ctx, f"Decoded {len(result)} bytes → {output_path}")
+    except BraidCodecError as exc:
+        category = _failure_taxonomy_from_text(str(exc))
+        _echo(ctx, f"Failure category: {category}", err=True)
+        ctx.exit(_handle_error(ctx, exc))
     except Exception as exc:
         ctx.exit(_handle_error(ctx, exc))
 
@@ -205,32 +331,46 @@ def decode_cmd(
 @click.argument("encoded_file", type=click.Path(exists=True))
 @click.option("--key", "key_path", required=True, type=click.Path(exists=True), help="Key file.")
 @click.option("--fermion-check", is_flag=True, help="Enable fermion occupation check.")
+@click.option("--topology-check", is_flag=True, help="Enable topology metadata check.")
+@click.option(
+    "--diagnostics",
+    is_flag=True,
+    help="Always print detailed verification diagnostics.",
+)
 @click.pass_context
 def verify_cmd(
     ctx: click.Context,
     encoded_file: str,
     key_path: str,
     fermion_check: bool,
+    topology_check: bool,
+    diagnostics: bool,
 ) -> None:
     """Verify integrity of an encoded file."""
     try:
         key = _load_key(Path(key_path))
         stream = _load_stream(Path(encoded_file))
-        result = verify(stream, key, fermion_check=fermion_check)
+        result = verify(stream, key, fermion_check=fermion_check, topology_check=topology_check)
 
         _echo(ctx, f"Structural : {'PASS' if result.structural_passed else 'FAIL'}")
         _echo(ctx, f"Writhe     : {'PASS' if result.writhe_passed else 'FAIL'}")
         _echo(ctx, f"Invariant  : {'PASS' if result.invariant_passed else 'FAIL'}")
         if result.fermion_passed is not None:
             _echo(ctx, f"Fermion    : {'PASS' if result.fermion_passed else 'FAIL'}")
+        if result.topology_passed is not None:
+            _echo(ctx, f"Topology   : {'PASS' if result.topology_passed else 'FAIL'}")
         _echo(ctx, f"Checksum   : {'PASS' if result.checksum_passed else 'FAIL'}")
         _echo(ctx, f"Overall    : {'VALID' if result.valid else 'INVALID'}")
 
         if result.failed_blocks:
             _echo(ctx, f"Failed blocks: {list(result.failed_blocks)}")
-        if _verbose(ctx):
+        if _verbose(ctx) or diagnostics:
             for detail in result.details:
                 _echo(ctx, f"  {detail}")
+
+        if not result.valid and result.details:
+            category = _failure_taxonomy_from_text(" ".join(result.details))
+            _echo(ctx, f"Failure category: {category}")
 
         if not result.valid:
             ctx.exit(EXIT_INTEGRITY)

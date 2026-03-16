@@ -151,7 +151,8 @@ def bytes_to_generators(
         raise ValueError("Chunk value overflows the generator block capacity")
 
     digits.reverse()  # most-significant digit first
-    return [_digit_to_generator(d, n_strands) for d in digits]
+    half = n_strands - 1
+    return [d + 1 if d < half else -(d - half + 1) for d in digits]
 
 
 def generators_to_bytes(
@@ -182,9 +183,17 @@ def generators_to_bytes(
     b = _base(n_strands)
 
     # Digits → big-endian integer reconstruction (Horner's method).
+    half = n_strands - 1
     value = 0
     for g in generators:
-        digit = _generator_to_digit(g, n_strands)
+        if g == 0:
+            raise ValueError("Generator index must be non-zero")
+        if abs(g) >= n_strands:
+            raise ValueError(
+                f"Generator |{g}| out of range for {n_strands} strands "
+                f"(must be in 1..{n_strands - 1})"
+            )
+        digit = g - 1 if g > 0 else half + abs(g) - 1
         value = value * b + digit
 
     # Determine the padded byte length (full block capacity).
