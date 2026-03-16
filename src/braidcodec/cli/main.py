@@ -77,6 +77,10 @@ def _handle_error(ctx: click.Context, exc: Exception) -> int:
 def _failure_taxonomy_from_text(text: str) -> str:
     """Map error/detail text to user-facing failure taxonomy."""
     t = text.lower()
+    if "strict-gate-profile" in t:
+        return "strict-gate-profile-failure"
+    if "discovery required" in t or "discovery-required" in t:
+        return "discovery-required-failure"
     if "contraction" in t:
         return "contraction-failure"
     if "convergence" in t or "residual gate" in t:
@@ -190,6 +194,39 @@ def keygen(ctx: click.Context, sector: str, strands: int, output_path: str) -> N
     help="Optional reconstructive domain override.",
 )
 @click.option(
+    "--reconstructive-discovery",
+    type=click.Choice(["enabled", "disabled", "required"], case_sensitive=True),
+    default="enabled",
+    show_default=True,
+    help="Equation discovery mode for reconstructive preprocessing.",
+)
+@click.option(
+    "--reconstructive-compact-transport",
+    type=click.Choice(["enabled", "lean"], case_sensitive=True),
+    default="enabled",
+    show_default=True,
+    help="Compact transport policy for reconstructive mode.",
+)
+@click.option(
+    "--reconstructive-compact-audit-bundle",
+    is_flag=True,
+    default=False,
+    help="Include optional compact reconstructive audit sidecar metadata.",
+)
+@click.option(
+    "--reconstructive-library",
+    default=None,
+    type=click.Path(),
+    help="Optional path to persistent reconstructive equation library JSON.",
+)
+@click.option(
+    "--strict-gates",
+    "strict_gates_profile",
+    default="default-v1",
+    show_default=True,
+    help="Strict gate/discovery profile identifier.",
+)
+@click.option(
     "--container",
     "container_policy",
     type=click.Choice(["auto", "wire", "hdf5"], case_sensitive=True),
@@ -209,6 +246,11 @@ def encode_cmd(
     workers: int | None,
     preprocessing_mode: str,
     reconstructive_domain: str | None,
+    reconstructive_discovery: str,
+    reconstructive_compact_transport: str,
+    reconstructive_compact_audit_bundle: bool,
+    reconstructive_library: str | None,
+    strict_gates_profile: str,
     container_policy: str,
 ) -> None:
     """Encode a file into BraidCodec format."""
@@ -226,6 +268,11 @@ def encode_cmd(
             max_workers=workers,
             preprocessing_mode=preprocessing_mode,
             reconstructive_domain=reconstructive_domain,
+            reconstructive_discovery=reconstructive_discovery,
+            reconstructive_compact_transport=reconstructive_compact_transport,
+            reconstructive_compact_audit_bundle=reconstructive_compact_audit_bundle,
+            reconstructive_library_path=reconstructive_library,
+            reconstructive_strict_gate_profile=strict_gates_profile,
         )
 
         if comp_level > 0:

@@ -20,6 +20,8 @@ import io
 import json
 import struct
 import time
+import zlib
+from base64 import b85decode
 from dataclasses import dataclass, field
 from numbers import Real
 from pathlib import Path
@@ -58,57 +60,100 @@ _RECONSTRUCTIVE_REQUIRED_METADATA: frozenset[str] = frozenset(
         "normalization_profile_hash",
     }
 )
-_RECONSTRUCTIVE_PAYLOAD_KEY = "reconstructive_payload_v1"
-_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT = "rp1"
 _RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY_SHORT = "rpb"
-_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY = "reconstructive_program_payload_bin"
-_RECONSTRUCTIVE_PROGRAM_PAYLOAD_SIDEBAND_MARKERS: frozenset[str] = frozenset({"@", "@bin"})
+_RECONSTRUCTIVE_HEADER_KEY_SHORT = "rh"
+_RECONSTRUCTIVE_TRANSPORT_KEY_SHORT = "rt"
+_RECONSTRUCTIVE_TRANSPORT_TYPE_KEY_SHORT = "rtt"
+_RECONSTRUCTIVE_COMMITMENT_V3_KEY_SHORT = "rc3"
+_RECONSTRUCTIVE_HEADER_PREFIX = "~rh85:"
+_RECONSTRUCTIVE_OPTIONAL_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "discovery_profile_id",
+        "equation_library_signature",
+        "equation_library_hit",
+        "equation_symbolic_hash",
+    }
+)
+
+_TRANSPORT_TYPE_TO_PROGRAM: dict[str, str] = {
+    "dbe1": "discovered-braid-equation-v1",
+    "de1": "discovered-equation-v1",
+    "rt1": "repeat-text-v1",
+    "jli1": "json-linear-items-v1",
+    "jl1": "json-literal-v1",
+    "ls1": "logs-seq-v1",
+    "lr2": "latent-residual-v2",
+    "lr3": "latent-residual-v3",
+}
+
+
+def _parse_reconstructive_compact_header(metadata: Mapping[str, str]) -> dict[str, str] | None:
+    """Parse packed compact reconstructive header if present."""
+    blob = str(metadata.get(_RECONSTRUCTIVE_HEADER_KEY_SHORT, ""))
+    if not blob:
+        return None
+
+    if not blob.startswith(_RECONSTRUCTIVE_HEADER_PREFIX):
+        raise FormatError("Unsupported compact reconstructive header encoding")
+
+    obj: object
+    try:
+        raw = zlib.decompress(b85decode(blob[len(_RECONSTRUCTIVE_HEADER_PREFIX) :].encode("ascii")))
+        obj = msgpack.unpackb(raw, raw=False)
+    except Exception as exc:
+        raise FormatError("Invalid compact reconstructive header payload") from exc
+
+    if not isinstance(obj, dict):
+        raise FormatError("Compact reconstructive header must decode to object")
+    transport_code = str(obj.get("t", ""))
+    sidechannel_blob = str(obj.get("p", ""))
+    if not transport_code or not sidechannel_blob:
+        raise FormatError("Compact reconstructive header missing required fields")
+    return {
+        "t": transport_code,
+        "p": sidechannel_blob,
+    }
 
 
 def _get_reconstructive_program_sidechannel(metadata: Mapping[str, str]) -> str:
     """Return reconstructive program side-channel blob if present."""
-    blob = str(metadata.get(_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY_SHORT, ""))
-    if blob:
-        return blob
-    return str(metadata.get(_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY, ""))
+    header = _parse_reconstructive_compact_header(metadata)
+    if header is not None:
+        return header["p"]
+    return str(metadata.get(_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY_SHORT, ""))
 
 
-def _get_reconstructive_payload_blob(metadata: Mapping[str, str]) -> str:
-    """Return compact reconstructive payload blob from short or legacy key."""
-    blob = str(metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT, ""))
-    if blob:
-        return blob
-    return str(metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY, ""))
-_RECONSTRUCTIVE_PAYLOAD_REQUIRED_KEYS: frozenset[str] = frozenset(
-    {
-        "model_id",
-        "model_version",
-        "domain_kind",
-        "tokenizer_id",
-        "tokenizer_version",
-        "bin_count",
-        "bin_table_hash",
-        "vocab_hash",
-        "normalization_profile_id",
-        "normalization_profile_hash",
-        "manifold_profile_id",
-        "manifold_state_hash",
-        "reconstructive_graph_hash",
-        "km_residual_max",
-        "km_residual_mean",
-        "km_iters_mean",
-        "km_valid_ratio",
-        "km_seed_vector",
-        "km_kappa",
-        "km_eta",
-        "km_tol",
-        "km_max_iter",
-        "km_threshold_residual_max",
-        "km_threshold_valid_ratio",
-        "reconstructive_program_type",
-        "reconstructive_program_payload",
-    }
-)
+def _get_reconstructive_transport_code(metadata: Mapping[str, str]) -> str:
+    """Return reconstructive transport code from compact metadata keys."""
+    header = _parse_reconstructive_compact_header(metadata)
+    if header is not None:
+        return header["t"]
+    return str(metadata.get(_RECONSTRUCTIVE_TRANSPORT_KEY_SHORT, ""))
+
+
+def _split_reconstructive_transport_code(code: str) -> tuple[str, str]:
+    """Split transport code into (family, type_code)."""
+    if "." in code:
+        family, type_code = code.split(".", 1)
+        return family, type_code
+    return code, ""
+
+
+def get_reconstructive_transport_code(metadata: Mapping[str, str]) -> str:
+    """Public helper to resolve compact reconstructive transport code."""
+    return _get_reconstructive_transport_code(metadata)
+
+
+def _get_reconstructive_transport_type_code(metadata: Mapping[str, str]) -> str:
+    """Return reconstructive transport type code from compact metadata keys."""
+    code = _get_reconstructive_transport_code(metadata)
+    _, inline_type = _split_reconstructive_transport_code(code)
+    return inline_type
+
+
+def _get_reconstructive_commitment_v3(metadata: Mapping[str, str]) -> str:
+    """Return reconstructive commitment v3 digest from current key."""
+    return str(metadata.get(_RECONSTRUCTIVE_COMMITMENT_V3_KEY_SHORT, ""))
 
 
 # ── EncodedBlock ──────────────────────────────────────────────────────────
@@ -1017,120 +1062,82 @@ def build_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> str:
         "reconstructive_program_type": str(metadata["reconstructive_program_type"]),
         "reconstructive_program_payload": str(metadata["reconstructive_program_payload"]),
     }
+    for key_name in _RECONSTRUCTIVE_OPTIONAL_PAYLOAD_KEYS:
+        if key_name in metadata:
+            payload[key_name] = str(metadata[key_name])
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def parse_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
-    """Parse compact reconstructive payload JSON from stream metadata."""
-    payload_blob = _get_reconstructive_payload_blob(metadata)
-    if not payload_blob:
-        raise FormatError(f"Missing {_RECONSTRUCTIVE_PAYLOAD_KEY} metadata entry")
-
-    try:
-        payload_obj = json.loads(payload_blob)
-    except json.JSONDecodeError as exc:
-        raise FormatError(
-            f"Invalid {_RECONSTRUCTIVE_PAYLOAD_KEY} JSON",
-            reason=str(exc),
-        ) from exc
-
-    if not isinstance(payload_obj, dict):
-        raise FormatError(
-            f"{_RECONSTRUCTIVE_PAYLOAD_KEY} must decode to an object",
-        )
-
-    payload = {str(k): str(v) for k, v in payload_obj.items()}
-
-    marker = payload.get("reconstructive_program_payload", "")
-    if marker in _RECONSTRUCTIVE_PROGRAM_PAYLOAD_SIDEBAND_MARKERS:
-        program_blob = _get_reconstructive_program_sidechannel(metadata)
-        if not program_blob:
-            raise FormatError(
-                "Missing reconstructive program payload side-channel",
-                key=_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY,
-            )
-        payload["reconstructive_program_payload"] = program_blob
-
-    return payload
+    """Parse reconstructive payload from compact transport metadata only."""
+    compact_program = _parse_compact_transport_program(metadata)
+    if compact_program is not None:
+        return compact_program
+    raise FormatError("Missing reconstructive compact transport code")
 
 
-def validate_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
-    """Validate compact reconstructive payload metadata and return parsed payload."""
-    payload = parse_reconstructive_payload_metadata(metadata)
+def _parse_compact_transport_program(metadata: Mapping[str, str]) -> dict[str, str] | None:
+    """Parse compact reconstructive transport metadata into program payload."""
+    full_code = _get_reconstructive_transport_code(metadata)
+    if not full_code:
+        return None
+    code, _ = _split_reconstructive_transport_code(full_code)
+    if code not in {"ps1", "ps2"}:
+        raise FormatError("Unsupported reconstructive compact transport code", code=code)
 
-    missing = sorted(_RECONSTRUCTIVE_PAYLOAD_REQUIRED_KEYS - set(payload.keys()))
-    if missing:
-        raise FormatError(
-            f"Missing reconstructive payload keys: {missing}",
-            missing_keys=missing,
-        )
-
-    if payload["model_id"] != "frequency-manifold" or payload["model_version"] != "1":
-        raise FormatError(
-            "Unsupported reconstructive payload model/version",
-            model_id=payload["model_id"],
-            model_version=payload["model_version"],
-        )
-
-    for key_name in (
-        "tokenizer_id",
-        "tokenizer_version",
-        "domain_kind",
-        "bin_count",
-        "bin_table_hash",
-        "vocab_hash",
-        "normalization_profile_id",
-        "normalization_profile_hash",
-        "km_seed_vector",
-        "km_kappa",
-        "km_eta",
-        "km_tol",
-        "km_max_iter",
-        "km_threshold_residual_max",
-        "km_threshold_valid_ratio",
-        "reconstructive_program_type",
-        "reconstructive_program_payload",
-    ):
-        # Some large payload mirrors may be omitted from top-level metadata for
-        # compactness; if present they must exactly match the payload contract.
-        if key_name not in metadata:
-            continue
-        if (
-            key_name == "reconstructive_program_payload"
-            and str(metadata.get(key_name, "")) in _RECONSTRUCTIVE_PROGRAM_PAYLOAD_SIDEBAND_MARKERS
-            and _get_reconstructive_program_sidechannel(metadata)
-        ):
-            continue
-        if str(metadata.get(key_name, "")) != payload[key_name]:
-            raise FormatError(
-                f"Reconstructive payload mismatch for '{key_name}'",
-                key=key_name,
-            )
-
-    try:
-        km_valid_ratio = float(payload["km_valid_ratio"])
-        km_residual_max = float(payload["km_residual_max"])
-        km_residual_mean = float(payload["km_residual_mean"])
-        km_iters_mean = float(payload["km_iters_mean"])
-    except ValueError as exc:
-        raise FormatError("Reconstructive payload diagnostics must be numeric") from exc
-
-    if not (0.0 <= km_valid_ratio <= 1.0):
-        raise FormatError("km_valid_ratio must be within [0,1]", km_valid_ratio=km_valid_ratio)
-    if km_residual_max < 0.0 or km_residual_mean < 0.0 or km_iters_mean < 0.0:
-        raise FormatError("Reconstructive payload diagnostics must be non-negative")
-
-    return payload
+    blob = _get_reconstructive_program_sidechannel(metadata)
+    if not blob:
+        raise FormatError("Missing reconstructive compact program sidechannel")
+    tcode = _get_reconstructive_transport_type_code(metadata)
+    program_type = _TRANSPORT_TYPE_TO_PROGRAM.get(tcode, "")
+    if not program_type:
+        raise FormatError("Unsupported reconstructive compact transport type", type_code=tcode)
+    return {
+        "reconstructive_program_type": program_type,
+        "reconstructive_program_payload": blob,
+    }
 
 
-def compute_reconstructive_commitment(
-    payload_json: str,
+def validate_reconstructive_compact_transport_metadata(
+    metadata: Mapping[str, str],
     blocks: tuple[EncodedBlock, ...],
-) -> str:
-    """Compute deterministic reconstructive commitment over payload and blocks."""
-    hasher = blake3.blake3()
-    hasher.update(payload_json.encode("utf-8"))
+) -> dict[str, str]:
+    """Validate compact reconstructive transport metadata and commitment."""
+    full_code = _get_reconstructive_transport_code(metadata)
+    code, _ = _split_reconstructive_transport_code(full_code)
+    payload = _parse_compact_transport_program(metadata)
+    if payload is None:
+        raise FormatError("Missing reconstructive compact transport code")
 
+    sidechannel_blob = payload["reconstructive_program_payload"] if code == "ps1" else ""
+
+    if code == "ps2":
+        # Lean transport is checksum-authoritative and intentionally omits
+        # reconstructive commitment metadata.
+        return payload
+
+    stored_v3 = _get_reconstructive_commitment_v3(metadata)
+    if not stored_v3:
+        raise FormatError("Missing reconstructive_commitment_v3 metadata entry")
+
+    expected_v3 = compute_reconstructive_commitment_v3(
+        transport_code=full_code,
+        blocks=blocks,
+        program_sidechannel_blob=sidechannel_blob,
+    )
+    if stored_v3 != expected_v3:
+        raise FormatError(
+            "Reconstructive compact commitment v3 mismatch",
+            expected=expected_v3,
+            actual=stored_v3,
+        )
+
+    return payload
+
+
+def _compute_reconstructive_blocks_digest(blocks: tuple[EncodedBlock, ...]) -> str:
+    """Compute deterministic digest over compact transport blocks."""
+    hasher = blake3.blake3()
     for block in sorted(blocks, key=lambda b: b.block_index):
         header = (
             f"{block.block_index}|{block.original_length}|{block.n_strands}|"
@@ -1138,27 +1145,27 @@ def compute_reconstructive_commitment(
         ).encode("ascii")
         hasher.update(header)
         hasher.update(",".join(str(g) for g in block.generators).encode("ascii"))
-
     return hasher.hexdigest()
 
 
-def validate_reconstructive_commitment_metadata(
-    metadata: Mapping[str, str],
+def compute_reconstructive_commitment_v3(
+    *,
+    transport_code: str,
     blocks: tuple[EncodedBlock, ...],
-) -> None:
-    """Validate reconstructive commitment metadata against stream blocks."""
-    payload_json = _get_reconstructive_payload_blob(metadata)
-    if not payload_json:
-        raise FormatError(f"Missing {_RECONSTRUCTIVE_PAYLOAD_KEY} metadata entry")
+    program_sidechannel_blob: str = "",
+) -> str:
+    """Compute canonical compact commitment object digest (schema v3)."""
+    family, _ = _split_reconstructive_transport_code(transport_code)
+    canonical_obj = {
+        "embedded_blocks_digest": _compute_reconstructive_blocks_digest(blocks),
+        "program_sidechannel_digest": blake3.blake3(program_sidechannel_blob.encode("utf-8")).hexdigest()
+        if program_sidechannel_blob
+        else "",
+        "schema_version": "3",
+        "transport_code": transport_code,
+        "transport_family": family,
+    }
+    canonical_blob = json.dumps(canonical_obj, sort_keys=True, separators=(",", ":"))
+    return blake3.blake3(canonical_blob.encode("utf-8")).hexdigest()
 
-    stored = str(metadata.get("reconstructive_commitment", ""))
-    if not stored:
-        raise FormatError("Missing reconstructive_commitment metadata entry")
 
-    expected = compute_reconstructive_commitment(payload_json, blocks)
-    if stored != expected:
-        raise FormatError(
-            "Reconstructive commitment mismatch",
-            expected=expected,
-            actual=stored,
-        )

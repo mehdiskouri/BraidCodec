@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -10,7 +9,6 @@ import blake3
 import pytest
 
 from braidcodec.codec.encoder import encode
-from braidcodec.codec.schema import compute_reconstructive_commitment
 from braidcodec.crypto.integrity import VerificationResult, verify
 from braidcodec.crypto.keys import BraidKey, keygen
 
@@ -21,14 +19,6 @@ if TYPE_CHECKING:
 
 _K_SMALL: int = 8  # tier 2 (Jones)
 _K_DEFAULT: int = 32  # tier 3 (trace)
-
-
-def _payload_key(meta: dict[str, str]) -> str:
-    if "rp1" in meta:
-        return "rp1"
-    return "reconstructive_payload_v1"
-
-
 def _make_key(sector: str = "TSR", theta_offset: float = 1.0, n_strands: int = 4) -> BraidKey:
     return keygen(sector=sector, n_strands=n_strands, theta_offset=theta_offset)
 
@@ -195,7 +185,7 @@ class TestVerifyCorruption:
         assert result_topo.valid is False
 
     def test_reconstructive_metadata_corruption(self) -> None:
-        """Missing reconstructive metadata key fails structural validation."""
+        """Missing compact sidechannel fails structural validation."""
         key = _make_key()
         stream = encode(
             b"Hello reconstructive",
@@ -204,7 +194,7 @@ class TestVerifyCorruption:
             preprocessing_mode="reconstructive",
         )
         bad_meta = dict(stream.metadata)
-        bad_meta.pop("vocab_hash", None)
+        bad_meta.pop("rpb", None)
         tampered = replace(stream, metadata=bad_meta)
 
         result = verify(tampered, key)
@@ -222,7 +212,7 @@ class TestVerifyCorruption:
             preprocessing_mode="reconstructive",
         )
         bad_meta = dict(stream.metadata)
-        bad_meta["reconstructive_commitment"] = "0" * 64
+        bad_meta["rc3"] = "0" * 64
         tampered = replace(stream, metadata=bad_meta)
 
         result = verify(tampered, key)
@@ -230,34 +220,56 @@ class TestVerifyCorruption:
         assert result.valid is False
         assert any("Reconstructive metadata invalid" in d for d in result.details)
 
-    def test_reconstructive_solver_gate_corruption(self) -> None:
-        """Corrupted K_M parameters fail reconstructive structural gate."""
+    def test_reconstructive_lean_payload_corruption(self) -> None:
+        """Lean payload tamper remains structurally valid but fails checksum."""
         key = _make_key()
         stream = encode(
             b"Hello reconstructive",
             key,
             generators_per_block=_K_SMALL,
             preprocessing_mode="reconstructive",
+            reconstructive_compact_transport="lean",
         )
         bad_meta = dict(stream.metadata)
-        payload_key = _payload_key(bad_meta)
-        payload_obj = json.loads(bad_meta[payload_key])
-        payload_obj["km_kappa"] = "0.8"
-        payload_obj["km_eta"] = "0.4"
-        payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
-        bad_meta["km_kappa"] = "0.8"
-        bad_meta["km_eta"] = "0.4"
-        bad_meta[payload_key] = payload
-        bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
-            payload,
-            stream.blocks,
-        )
+        bad_meta["rpb"] = "not-json"
         tampered = replace(stream, metadata=bad_meta)
 
         result = verify(tampered, key)
-        assert result.structural_passed is False
+        assert result.structural_passed is True
+        assert result.checksum_passed is False
         assert result.valid is False
-        assert any("Reconstructive metadata invalid" in d for d in result.details)
+
+    def test_reconstructive_compact_transport_verifies_clean(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"A" * 512,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="enabled",
+        )
+        result = verify(stream, key)
+        assert result.valid is True
+        assert result.structural_passed is True
+        assert result.checksum_passed is True
+
+    def test_reconstructive_lean_transport_verifies_clean(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"A" * 512,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="lean",
+        )
+        result = verify(stream, key)
+        assert result.valid is True
+        assert result.structural_passed is True
+        assert result.checksum_passed is True
 
 
 # ── Structural short-circuit ──────────────────────────────────────────────

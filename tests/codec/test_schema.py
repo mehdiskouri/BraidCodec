@@ -11,8 +11,11 @@ Covers:
 from __future__ import annotations
 
 import struct
+import zlib
+from base64 import b85encode
 
 import blake3
+import msgpack
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -41,11 +44,9 @@ from braidcodec._exceptions import (
 from braidcodec.codec.schema import (
     EncodedBlock,
     EncodedStream,
-    build_reconstructive_payload_metadata,
-    compute_reconstructive_commitment,
+    compute_reconstructive_commitment_v3,
     parse_reconstructive_payload_metadata,
-    validate_reconstructive_commitment_metadata,
-    validate_reconstructive_payload_metadata,
+    validate_reconstructive_compact_transport_metadata,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -404,76 +405,64 @@ class TestEncodedBlockDictRoundTrip:
 
 
 class TestReconstructivePayloadMetadata:
-    def _sample_metadata(self) -> dict[str, str]:
-        return {
-            "preprocessing_mode": "reconstructive",
-            "tokenizer_id": "frequency-tokenizer",
-            "tokenizer_version": "v1",
-            "domain_kind": "text",
-            "bin_count": "128",
-            "bin_table_hash": "a" * 64,
-            "vocab_hash": "b" * 64,
-            "normalization_profile_id": "osc-norm-v1",
-            "normalization_profile_hash": "c" * 64,
-            "manifold_profile_id": "hypergraph-manifold-v1",
-            "manifold_state_hash": "d" * 64,
-            "reconstructive_graph_hash": "e" * 64,
-            "km_residual_max": "0.001",
-            "km_residual_mean": "0.0001",
-            "km_iters_mean": "5",
-            "km_valid_ratio": "1",
-            "km_seed_vector": "0.1,0.2,0.3",
-            "km_kappa": "0.3",
-            "km_eta": "0.654",
-            "km_tol": "1e-5",
-            "km_max_iter": "100",
-            "km_threshold_residual_max": "1e-5",
-            "km_threshold_valid_ratio": "1",
-            "reconstructive_program_type": "json-literal-v1",
-            "reconstructive_program_payload": '{"raw_json":"{}"}',
+    def test_parse_compact_transport_payload_rejects_legacy_payload_only_metadata(self) -> None:
+        meta = {
+            "rp1": "{}",
         }
+        with pytest.raises(FormatError, match="compact transport code"):
+            parse_reconstructive_payload_metadata(meta)
 
-    def test_build_parse_validate_roundtrip(self) -> None:
-        meta = self._sample_metadata()
-        payload = build_reconstructive_payload_metadata(meta)
-        meta["reconstructive_payload_v1"] = payload
-
+    def test_parse_compact_transport_payload_from_folded_rt_tag(self) -> None:
+        meta = {
+            "rt": "ps1.jl1",
+            "rpb": '{"raw_json":"{}"}',
+        }
         parsed = parse_reconstructive_payload_metadata(meta)
-        assert parsed["model_id"] == "frequency-manifold"
-        assert parsed["model_version"] == "1"
-        validated = validate_reconstructive_payload_metadata(meta)
-        assert validated["domain_kind"] == "text"
+        assert parsed["reconstructive_program_type"] == "json-literal-v1"
+        assert parsed["reconstructive_program_payload"] == '{"raw_json":"{}"}'
 
-    def test_validate_rejects_payload_mismatch(self) -> None:
-        meta = self._sample_metadata()
-        payload = build_reconstructive_payload_metadata(meta)
-        meta["reconstructive_payload_v1"] = payload
-        meta["vocab_hash"] = "f" * 64
+    def test_parse_compact_transport_payload_from_reconstructive_header(self) -> None:
+        packed = b85encode(
+            zlib.compress(msgpack.packb({"t": "ps1.jl1", "p": '{"raw_json":"{}"}'}, use_bin_type=True), level=9)
+        ).decode("ascii")
+        meta = {
+            "rh": f"~rh85:{packed}",
+        }
+        parsed = parse_reconstructive_payload_metadata(meta)
+        assert parsed["reconstructive_program_type"] == "json-literal-v1"
+        assert parsed["reconstructive_program_payload"] == '{"raw_json":"{}"}'
 
-        with pytest.raises(FormatError, match="payload mismatch"):
-            validate_reconstructive_payload_metadata(meta)
+    def test_parse_compact_transport_payload_rejects_missing_inline_type(self) -> None:
+        meta = {
+            "rt": "ps1",
+            "rtt": "jl1",
+            "rpb": '{"raw_json":"{}"}',
+        }
+        with pytest.raises(FormatError, match="transport type"):
+            parse_reconstructive_payload_metadata(meta)
 
-    def test_commitment_validation_rejects_mismatch(self) -> None:
-        meta = self._sample_metadata()
-        payload = build_reconstructive_payload_metadata(meta)
-        meta["reconstructive_payload_v1"] = payload
-
-        block = EncodedBlock(
-            generators=[1, -2, 1],
-            n_strands=4,
-            sector="TSR",
-            writhe=0,
-            block_index=0,
-            original_length=3,
-            invariant_tier=1,
+    def test_validate_compact_transport_commitment_v3(self) -> None:
+        meta = {
+            "rt": "ps1.jl1",
+            "rpb": '{"raw_json":"{}"}',
+        }
+        blocks: tuple[EncodedBlock, ...] = tuple()
+        meta["rc3"] = compute_reconstructive_commitment_v3(
+            transport_code="ps1.jl1",
+            blocks=blocks,
+            program_sidechannel_blob='{"raw_json":"{}"}',
         )
-        meta["reconstructive_commitment"] = compute_reconstructive_commitment(payload, (block,))
-        validate_reconstructive_commitment_metadata(meta, (block,))
+        payload = validate_reconstructive_compact_transport_metadata(meta, blocks)
+        assert payload["reconstructive_program_type"] == "json-literal-v1"
 
-        bad_meta = dict(meta)
-        bad_meta["reconstructive_commitment"] = "0" * 64
-        with pytest.raises(FormatError, match="commitment mismatch"):
-            validate_reconstructive_commitment_metadata(bad_meta, (block,))
+    def test_validate_compact_transport_commitment_v3_rejects_mismatch(self) -> None:
+        meta = {
+            "rt": "ps1.jl1",
+            "rpb": '{"raw_json":"{}"}',
+            "rc3": "0" * 64,
+        }
+        with pytest.raises(FormatError, match="commitment v3 mismatch"):
+            validate_reconstructive_compact_transport_metadata(meta, tuple())
 
 
 # ═══════════════════════════════════════════════════════════════════════════

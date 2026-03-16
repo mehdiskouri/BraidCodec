@@ -67,6 +67,7 @@ def encode(
     max_workers: int | None = None,
     preprocessing_mode: str = "topology",
     reconstructive_domain: str | None = None,
+    reconstructive_compact_transport: str = "enabled",
 ) -> EncodedStream
 ```
 
@@ -78,12 +79,14 @@ Encode arbitrary bytes into a topological braid stream.
 | `key` | `BraidKey` from `keygen`. |
 | `generators_per_block` | Generators per block. Lower = faster (tier 1-2), higher = more compact. |
 | `max_workers` | Parallel encoding workers. `None` = auto (capped at 8). |
-| `preprocessing_mode` | `"topology"` (default), `"legacy"`, or experimental `"reconstructive"`. |
+| `preprocessing_mode` | `"topology"` (default), `"legacy"`, or `"reconstructive"`. |
 | `reconstructive_domain` | Optional domain override for reconstructive mode: `"text"`, `"json"`, or `"logs"`. |
+| `reconstructive_compact_transport` | Compact policy for reconstructive mode: `"enabled"` (commitment-validated `ps1.*`) or `"lean"` (checksum-authoritative `ps2.*`). |
 
-Notes for `reconstructive` mode (current phase):
-- Deterministic tokenizer/normalization/manifold/K_M diagnostics are emitted in metadata.
-- Decode remains lossless through the existing generator channel while compact reconstructive payload wiring is in progress.
+Notes for `reconstructive` mode:
+- Compact transport metadata uses short keys: `rt` (transport code), `rpb` (program sidechannel), optional `rc3` (commitment for `enabled`), and optional `ra1` (audit sidecar).
+- `enabled` validates compact commitment v3 (`rc3`) during decode/verify.
+- `lean` intentionally omits reconstructive commitment metadata and relies on checksum authority.
 
 **Returns**: `EncodedStream` with blocks, invariants, and checksum.
 
@@ -273,7 +276,7 @@ Entry point: `braidcodec` (requires `pip install braidcodec[cli]`).
 | Command | Description | Exit codes |
 |---------|-------------|------------|
 | `braidcodec keygen -o KEY` | Generate key, write to file | 0, 4 |
-| `braidcodec encode INPUT -o OUTPUT --key KEY --preprocessing-mode topology|legacy|reconstructive [--reconstructive-domain text|json|logs]` | Encode file | 0, 3, 4 |
+| `braidcodec encode INPUT -o OUTPUT --key KEY --preprocessing-mode topology|legacy|reconstructive [--reconstructive-domain text|json|logs] [--reconstructive-compact-transport enabled|lean]` | Encode file | 0, 3, 4 |
 | `braidcodec decode INPUT -o OUTPUT --key KEY` | Decode file | 0, 1, 2, 3, 4 |
 | `braidcodec verify INPUT --key KEY [--fermion-check] [--topology-check] [--diagnostics]` | Verify integrity | 0, 1, 2, 3, 4 |
 | `braidcodec inspect INPUT` | Show stream metadata | 0, 3, 4 |

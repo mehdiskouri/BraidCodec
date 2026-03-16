@@ -75,45 +75,28 @@ flowchart LR
     G --> H[original bytes]
 ```
 
-## Reconstructive Contract (Phase A)
+## Reconstructive Compact Contract
 
-The reconstructive mode is a deterministic pipeline contract:
+Reconstructive mode serializes through compact transport metadata and validates it
+strictly on decode/verify.
 
-`tokenize -> normalize -> manifold-fit -> K_M solve -> project -> bytes -> verify`
+Compact transport policies:
 
-Hard failure gates:
+- `enabled`: `ps1.*` transport family with commitment validation (`rc3`, schema v3)
+- `lean`: `ps2.*` transport family without reconstructive commitment metadata
 
-- `L < 1` contraction precondition must hold.
-- K_M iteration must converge within configured bounds.
-- Topology/coherence checks must pass.
-- Final BLAKE3 checksum over reconstructed bytes must match.
+Compact metadata keys:
 
-If any gate fails, decode must fail closed.
+- `rt`: reconstructive compact transport code (`ps1.*` or `ps2.*`)
+- `rpb`: compact program sidechannel payload
+- `rc3` (optional): reconstructive compact commitment v3 (required for `enabled`)
+- `ra1` (optional): compact audit sidecar bundle
 
-## Frequency Tokenizer v1 (Phase B)
+Validation rules:
 
-Tokenizer defaults for reconstructive mode:
-
-- `tokenizer_id = frequency-tokenizer`
-- `tokenizer_version = v1`
-- `bin_count = 128`
-- Versioned frequency-bin table with stable `bin_table_hash`
-
-Canonicalization rules:
-
-- `Text`: UTF-8 decoding, Unicode NFC normalization, LF newlines.
-- `JSON`: canonical key ordering and stable compact formatting.
-- `Logs`: UTF-8 + newline normalization with deterministic token splitting.
-
-Required reconstructive metadata keys:
-
-- `tokenizer_id`
-- `tokenizer_version`
-- `domain_kind` (`text`, `json`, or `logs`)
-- `bin_count`
-- `bin_table_hash`
-- `vocab_hash`
-- `normalization_profile_id`
+- Missing compact transport code or sidechannel payload fails closed.
+- `enabled` must include a valid `rc3` commitment.
+- `lean` intentionally omits reconstructive commitment and remains checksum-authoritative.
 
 ## Compression
 

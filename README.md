@@ -86,6 +86,22 @@ braidcodec inspect data.brdc
 braidcodec benchmark
 ```
 
+### Reconstructive Compact Transport
+
+Reconstructive mode supports compact transport with two policies:
+
+- `enabled`: `ps1.*` compact transport with commitment validation (`rc3`)
+- `lean`: `ps2.*` compact transport without reconstructive commitment metadata
+
+Example:
+
+```bash
+braidcodec encode input.bin -o output.brdc --key my.key \
+    --preprocessing-mode reconstructive \
+    --reconstructive-domain logs \
+    --reconstructive-compact-transport enabled
+```
+
 Exit codes: `0` OK, `1` integrity failure, `2` key mismatch, `3` format error, `4` I/O error.
 
 ## Performance

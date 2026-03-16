@@ -43,13 +43,10 @@ from braidcodec.codec.preprocessing import (
     topology_commitment_v2,
 )
 from braidcodec.codec.reconstructive_compact import synthesize_reconstructive_bytes
-from braidcodec.codec.reconstructive_solver import validate_reconstructive_solver_payload
 from braidcodec.codec.reconstructive_transform import reconstructive_inverse_generators
 from braidcodec.codec.schema import (
-    parse_reconstructive_payload_metadata,
-    validate_reconstructive_commitment_metadata,
-    validate_reconstructive_metadata,
-    validate_reconstructive_payload_metadata,
+    get_reconstructive_transport_code,
+    validate_reconstructive_compact_transport_metadata,
 )
 
 if TYPE_CHECKING:
@@ -231,9 +228,13 @@ def _check_checksum(
             f"BLAKE3 checksum skipped: structurally invalid blocks {sorted(structurally_failed)}",
         )
 
-    if stream.metadata.get("preprocessing_mode") == "reconstructive" and len(stream.blocks) == 0:
+    transport_code = get_reconstructive_transport_code(stream.metadata)
+    reconstructive_mode = stream.metadata.get("preprocessing_mode") == "reconstructive" or bool(
+        transport_code
+    )
+    if reconstructive_mode:
         try:
-            payload = parse_reconstructive_payload_metadata(stream.metadata)
+            payload = validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
             reassembled = synthesize_reconstructive_bytes(payload)
         except (ValueError, TypeError, OverflowError, FormatError):
             return False, "BLAKE3 checksum failed: cannot reconstruct compact stream"
@@ -394,7 +395,7 @@ def _decode_generators_for_block(stream: EncodedStream, block: EncodedBlock) -> 
 
     mode = stream.metadata.get("preprocessing_mode")
     if mode == "reconstructive":
-        payload = parse_reconstructive_payload_metadata(stream.metadata)
+        payload = validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
         seed_vector = payload.get("km_seed_vector", "")
         return reconstructive_inverse_generators(
             block.generators,
@@ -496,12 +497,13 @@ def verify(
     sorted_blocks = sorted(stream.blocks, key=lambda b: b.block_index)
 
     # Reconstructive contract validation is treated as a structural check.
-    if stream.metadata.get("preprocessing_mode") == "reconstructive":
+    transport_code = get_reconstructive_transport_code(stream.metadata)
+    reconstructive_mode = stream.metadata.get("preprocessing_mode") == "reconstructive" or bool(
+        transport_code
+    )
+    if reconstructive_mode:
         try:
-            validate_reconstructive_metadata(stream.metadata)
-            payload = validate_reconstructive_payload_metadata(stream.metadata)
-            validate_reconstructive_commitment_metadata(stream.metadata, stream.blocks)
-            validate_reconstructive_solver_payload(payload)
+            validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
         except FormatError as exc:
             structural_passed = False
             details.append(f"Reconstructive metadata invalid: {exc}")

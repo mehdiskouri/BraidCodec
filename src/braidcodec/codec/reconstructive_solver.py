@@ -54,6 +54,17 @@ def validate_reconstructive_solver_payload(payload: dict[str, str]) -> None:
 
     residual_max_threshold = _parse_float(payload, "km_threshold_residual_max")
     valid_ratio_threshold = _parse_float(payload, "km_threshold_valid_ratio")
+    profile_id = payload.get("discovery_profile_id", "default-v1").strip().lower()
+
+    strict_profile = profile_id == "strict-v1"
+    if strict_profile:
+        # Strict profile carries pinned floor gates so payload tampering is detectable.
+        expected_residual_max = 1e-3
+        expected_valid_ratio = 0.9
+        if abs(residual_max_threshold - expected_residual_max) > 1e-15:
+            raise FormatError("strict-gate-profile-failure: km_threshold_residual_max mismatch")
+        if abs(valid_ratio_threshold - expected_valid_ratio) > 1e-15:
+            raise FormatError("strict-gate-profile-failure: km_threshold_valid_ratio mismatch")
 
     if max_iter < 1:
         raise FormatError("km_max_iter must be >= 1")
@@ -65,19 +76,22 @@ def validate_reconstructive_solver_payload(payload: dict[str, str]) -> None:
     try:
         ensure_contraction(kappa=kappa, eta=eta)
     except Exception as exc:
-        raise FormatError("K_M contraction gate failed") from exc
+        prefix = "strict-gate-profile-failure: " if strict_profile else ""
+        raise FormatError(prefix + "K_M contraction gate failed") from exc
 
     result = iterate_fixedpoint(seed, kappa=kappa, eta=eta, tol=tol, max_iter=max_iter)
 
     if result.diagnostics.converged_ratio < valid_ratio_threshold:
+        prefix = "strict-gate-profile-failure: " if strict_profile else ""
         raise FormatError(
-            "K_M convergence gate failed",
+            prefix + "K_M convergence gate failed",
             converged_ratio=result.diagnostics.converged_ratio,
             required_ratio=valid_ratio_threshold,
         )
     if result.diagnostics.residual_max > residual_max_threshold:
+        prefix = "strict-gate-profile-failure: " if strict_profile else ""
         raise FormatError(
-            "K_M residual gate failed",
+            prefix + "K_M residual gate failed",
             residual_max=result.diagnostics.residual_max,
             threshold=residual_max_threshold,
         )

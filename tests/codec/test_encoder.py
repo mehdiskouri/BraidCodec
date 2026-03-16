@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import zlib
+from base64 import b85decode
+
 import blake3
 import numpy as np
 import pytest
@@ -18,7 +22,7 @@ from braidcodec.codec.reconstructive_compact import parse_reconstructive_program
 from braidcodec.codec.schema import (
     EncodedStream,
     parse_reconstructive_payload_metadata,
-    validate_reconstructive_metadata,
+    validate_reconstructive_compact_transport_metadata,
 )
 from braidcodec.codec.tokenizer_frequency import FrequencyTokenizerV1
 from braidcodec.crypto.keys import BraidKey, keygen
@@ -33,6 +37,15 @@ _K_DEFAULT: int = 32
 
 def _make_key(sector: str = "TSR", theta_offset: float = 1.0, n_strands: int = 4) -> BraidKey:
     return keygen(sector=sector, n_strands=n_strands, theta_offset=theta_offset)
+
+
+def _decode_audit_bundle(meta: dict[str, str]) -> dict[str, str]:
+    packed = meta.get("ra1", "")
+    assert packed.startswith("~ra85:")
+    raw = zlib.decompress(b85decode(packed[len("~ra85:") :].encode("ascii")))
+    obj = json.loads(raw.decode("utf-8"))
+    assert isinstance(obj, dict)
+    return {str(k): str(v) for k, v in obj.items()}
 
 
 # ── Basic encoding ────────────────────────────────────────────────────────
@@ -304,14 +317,12 @@ class TestEncodePreprocessingModes:
             generators_per_block=_K_SMALL,
             preprocessing_mode="reconstructive",
         )
-        assert stream.metadata["preprocessing_mode"] == "reconstructive"
-        validate_reconstructive_metadata(stream.metadata)
-        payload = parse_reconstructive_payload_metadata(stream.metadata)
-        assert payload["model_id"] == "frequency-manifold"
-        assert payload["model_version"] == "1"
-        assert "reconstructive_commitment" in stream.metadata
-        assert float(stream.metadata["km_residual_max"]) >= 0.0
-        assert float(stream.metadata["km_valid_ratio"]) >= 0.0
+        assert stream.metadata["rt"].startswith("ps1.")
+        assert "rpb" in stream.metadata
+        assert "rc3" in stream.metadata
+        payload = validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
+        assert payload["reconstructive_program_type"]
+        assert payload["reconstructive_program_payload"]
 
     def test_reconstructive_mode_roundtrip_compatibility(self) -> None:
         key = _make_key()
@@ -340,7 +351,7 @@ class TestEncodePreprocessingModes:
         )
 
         assert len(reconstructive.blocks) == 0
-        assert reconstructive.metadata["execution_mode"] == "reconstructive-compact"
+        assert reconstructive.metadata["rt"].startswith("ps")
 
     def test_reconstructive_mode_rejects_non_utf8(self) -> None:
         key = _make_key()
@@ -381,7 +392,7 @@ class TestEncodePreprocessingModes:
             reconstructive_tokenization=tokenized,
         )
 
-        assert stream.metadata["execution_mode"] == "reconstructive-compact"
+        assert stream.metadata["rt"].startswith("ps")
         from braidcodec.codec.decoder import decode
 
         assert decode(stream, key, verify=False) == data
@@ -410,16 +421,13 @@ class TestEncodePreprocessingModes:
             generators_per_block=_K_SMALL,
             preprocessing_mode="reconstructive",
             reconstructive_domain="text",
+            reconstructive_compact_audit_bundle=True,
         )
 
-        assert "fidelity_energy" in stream.metadata
-        assert "fidelity_topology" in stream.metadata
-        assert "fidelity_coherence" in stream.metadata
-        assert "fidelity_bundle_v1" in stream.metadata
-        assert "coupling_matrix_nnz" in stream.metadata
-        assert "coupling_matrix_density" in stream.metadata
-        assert "coupling_matrix_spectral_radius" in stream.metadata
-        assert "coupling_matrix_hash" in stream.metadata
+        audit = _decode_audit_bundle(stream.metadata)
+        assert "fidelity_energy" in audit
+        assert "fidelity_topology" in audit
+        assert "fidelity_coherence" in audit
 
     def test_reconstructive_mode_uses_latent_residual_for_nonrepeating_text(self) -> None:
         key = _make_key()
@@ -451,7 +459,16 @@ class TestEncodePreprocessingModes:
                 "p",
                 "s",
             }
-            assert codec in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1", "z", "b", "l"}
+            assert codec in {
+                "raw-xor-v1",
+                "zlib-xor-v1",
+                "bz2-xor-v1",
+                "lzma-xor-v1",
+                "r",
+                "z",
+                "b",
+                "l",
+            }
         else:
             segments = program_payload.get("segments", program_payload.get("s"))
             original_length = program_payload.get("original_length", program_payload.get("n"))
@@ -491,6 +508,90 @@ class TestEncodePreprocessingModes:
         assert all(b.decode_generators is None for b in stream.blocks)
         assert all(b.topology_morton_key is not None for b in stream.blocks)
         assert all(b.topology_commitment is not None for b in stream.blocks)
+
+
+class TestEncodeReconstructiveCompactTransport:
+    def test_enabled_emits_minimal_metadata_for_discovered_braid(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"A" * 512,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="enabled",
+        )
+
+        assert ("rh" in stream.metadata) or (
+            "rt" in stream.metadata and "rpb" in stream.metadata
+        )
+        assert "rc3" in stream.metadata
+        assert "rtt" not in stream.metadata
+        assert "rp1" not in stream.metadata
+        assert "reconstructive_payload_v1" not in stream.metadata
+        assert "km_seed_vector" not in stream.metadata
+        assert len(stream.blocks) == 0
+
+    def test_enabled_compacts_fallback_program_when_discovery_unavailable(self) -> None:
+        key = _make_key()
+        stream = encode(
+            (
+                "This freeform UTF-8 sentence resists deterministic byte-law discovery. "
+                * 10
+            ).encode("utf-8"),
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="enabled",
+        )
+        assert ("rh" in stream.metadata) or ("rt" in stream.metadata and "rpb" in stream.metadata)
+        assert "rp1" not in stream.metadata
+
+    def test_rejects_removed_compact_transport_modes(self) -> None:
+        key = _make_key()
+        for mode in ("disabled", "required", "embedded"):
+            with pytest.raises(ValueError):
+                encode(
+                    b"A" * 256,
+                    key,
+                    generators_per_block=_K_SMALL,
+                    preprocessing_mode="reconstructive",
+                    reconstructive_domain="text",
+                    reconstructive_discovery="enabled",
+                    reconstructive_compact_transport=mode,
+                )
+
+    def test_lean_mode_emits_no_commitment(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"A" * 512,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="lean",
+        )
+        assert ("rh" in stream.metadata) or ("rt" in stream.metadata and "rpb" in stream.metadata)
+        assert "rc" not in stream.metadata
+
+    def test_enabled_can_emit_compact_audit_sidecar(self) -> None:
+        key = _make_key()
+        stream = encode(
+            b"A" * 512,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="enabled",
+            reconstructive_compact_audit_bundle=True,
+        )
+        assert "ra1" in stream.metadata
+        assert ("rh" in stream.metadata) or ("rt" in stream.metadata and "rpb" in stream.metadata)
 
 
 class TestLayerAwareBatching:

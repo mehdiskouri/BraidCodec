@@ -17,12 +17,19 @@ from typing import Literal
 import msgpack
 
 from braidcodec._exceptions import FormatError
+from braidcodec.codec.braid_program_codec import parse_discovered_braid_program
 
 DomainKind = Literal["text", "json", "logs"]
 _PACK_PREFIX = "~mp85:"
+_SIDEBAND_PACK_PREFIX = "~sp85:"
 _PREDICTOR_ENCODE: dict[str, str] = {"zero-v1": "z", "prev-byte-v1": "p", "spectral-byte-v1": "s"}
 _PREDICTOR_DECODE: dict[str, str] = {v: k for k, v in _PREDICTOR_ENCODE.items()}
-_CODEC_ENCODE: dict[str, str] = {"zlib-xor-v1": "z", "bz2-xor-v1": "b", "lzma-xor-v1": "l"}
+_CODEC_ENCODE: dict[str, str] = {
+    "raw-xor-v1": "r",
+    "zlib-xor-v1": "z",
+    "bz2-xor-v1": "b",
+    "lzma-xor-v1": "l",
+}
 _CODEC_DECODE: dict[str, str] = {v: k for k, v in _CODEC_ENCODE.items()}
 _DOMAIN_ENCODE: dict[str, str] = {"text": "t", "json": "j", "logs": "l"}
 _DOMAIN_DECODE: dict[str, str] = {v: k for k, v in _DOMAIN_ENCODE.items()}
@@ -41,6 +48,8 @@ def _compress_lzma(data: bytes) -> bytes:
 
 
 def _compress_by_codec(codec_name: str, data: bytes) -> bytes:
+    if codec_name == "raw-xor-v1":
+        return data
     if codec_name == "zlib-xor-v1":
         return _compress_zlib(data)
     if codec_name == "bz2-xor-v1":
@@ -51,6 +60,8 @@ def _compress_by_codec(codec_name: str, data: bytes) -> bytes:
 
 
 def _decompress_by_codec(codec_name: str, data: bytes) -> bytes:
+    if codec_name == "raw-xor-v1":
+        return data
     if codec_name == "zlib-xor-v1":
         return zlib.decompress(data)
     if codec_name == "bz2-xor-v1":
@@ -78,20 +89,13 @@ def _encode_residual_blob(data: bytes) -> str:
 
 
 def _decode_residual_blob(program: dict[str, object]) -> bytes:
-    """Decode residual bytes from payload (base85 preferred, base64 legacy)."""
+    """Decode residual bytes from payload (base85 compact encoding)."""
     raw_b85 = program.get("residual_b85", program.get("r85"))
     if isinstance(raw_b85, str) and raw_b85:
         try:
             return base64.b85decode(raw_b85.encode("ascii"))
         except Exception as exc:
             raise FormatError("Invalid latent residual base85 payload") from exc
-
-    raw_b64 = program.get("residual_b64", program.get("r64"))
-    if isinstance(raw_b64, str) and raw_b64:
-        try:
-            return base64.b64decode(raw_b64.encode("ascii"))
-        except Exception as exc:
-            raise FormatError("Invalid latent residual base64 payload") from exc
 
     raise FormatError("Missing latent residual payload bytes")
 
@@ -107,6 +111,13 @@ def _serialize_program_payload(program: dict[str, object]) -> str:
 
 def parse_reconstructive_program_payload(raw_payload: str) -> dict[str, object]:
     """Parse reconstructive program payload from JSON or packed base85 blob."""
+    if raw_payload.startswith(_SIDEBAND_PACK_PREFIX):
+        encoded = raw_payload[len(_SIDEBAND_PACK_PREFIX) :]
+        try:
+            raw_payload = zlib.decompress(base64.b85decode(encoded.encode("ascii"))).decode("utf-8")
+        except Exception as exc:
+            raise FormatError("Invalid packed sidechannel reconstructive program payload") from exc
+
     if raw_payload.startswith(_PACK_PREFIX):
         encoded = raw_payload[len(_PACK_PREFIX) :]
         try:
@@ -201,7 +212,7 @@ def _fit_best_segment_codec(
     )
     predictors.append(("spectral-byte-v1", spectral_pred, spectral_params))
 
-    codecs = ["zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"]
+    codecs = ["raw-xor-v1", "zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"]
     nnz_signal = coupling_nnz / max(len(source), 1)
     if coupling_density > 0.08 or coupling_spectral_radius > 25.0 or nnz_signal > 8.0:
         codecs = ["bz2-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
@@ -212,15 +223,25 @@ def _fit_best_segment_codec(
     best_codec = "zlib-xor-v1"
     best_compressed = b""
     best_predictor_params: dict[str, int] = {}
-    best_len: int | None = None
+    best_wire_len: int | None = None
 
     for predictor_name, predicted, predictor_params in predictors:
         residual = bytes(s ^ p for s, p in zip(source, predicted, strict=False))
         for codec_name in codecs:
             compressed = _compress_by_codec(codec_name, residual)
-            clen = len(compressed)
-            if best_len is None or clen < best_len:
-                best_len = clen
+            candidate_payload: dict[str, object] = {
+                "o": 0,
+                "l": len(source),
+                "p": _PREDICTOR_ENCODE.get(predictor_name, predictor_name),
+                "c": _CODEC_ENCODE.get(codec_name, codec_name),
+                "r85": _encode_residual_blob(compressed),
+            }
+            if predictor_params:
+                candidate_payload["pp"] = predictor_params
+            wire_len = len(json.dumps(candidate_payload, sort_keys=True, separators=(",", ":")))
+
+            if best_wire_len is None or wire_len < best_wire_len:
+                best_wire_len = wire_len
                 best_predictor = predictor_name
                 best_codec = codec_name
                 best_compressed = compressed
@@ -319,7 +340,7 @@ def fit_reconstructive_program(
             morton_key=0,
         )
 
-        payload_v2 = {
+        payload_v2: dict[str, object] = {
             "d": _DOMAIN_ENCODE.get(domain, domain),
             "p": _PREDICTOR_ENCODE.get(best_predictor, best_predictor),
             "c": _CODEC_ENCODE.get(best_codec, best_codec),
@@ -329,50 +350,63 @@ def fit_reconstructive_program(
         if best_predictor_params:
             payload_v2["pp"] = best_predictor_params
 
-        # Segment-pack v3: allow heterogeneous predictor/codec per chunk.
-        segments: list[dict[str, object]] = []
-        segment_size = 32768 if len(source) >= 65536 else 16384
-        for start in range(0, len(source), segment_size):
-            segment_index = start // max(segment_size, 1)
-            morton_key = _morton_key_1d(segment_index, lane=(c_nnz & 0x7))
-            chunk = source[start : start + segment_size]
-            cp = c_density * (1.0 + (morton_key & 0x3) * 0.03)
-            cr = c_radius * (1.0 + ((morton_key >> 2) & 0x3) * 0.02)
-            cn = max(0, round(c_nnz * (len(chunk) / max(len(source), 1))))
-            cn = max(0, round(cn * (1.0 + (((morton_key & 0x7) - 3) * 0.02))))
-            predictor, codec, compressed, params = _fit_best_segment_codec(
-                chunk,
-                coupling_density=cp,
-                coupling_spectral_radius=cr,
-                coupling_nnz=cn,
-                morton_key=morton_key,
-            )
-            segments.append(
-                {
+        payload_v2_serialized = _serialize_program_payload(payload_v2)
+
+        # Segment-pack v3: evaluate multiple chunk granularities and pick the
+        # smallest final serialized payload.
+        segment_candidates: list[int]
+        if len(source) <= 2048:
+            segment_candidates = [len(source)]
+        else:
+            segment_candidates = [s for s in (2048, 4096, 8192, 16384, 32768) if s < len(source)]
+            segment_candidates.append(len(source))
+
+        best_v3_payload: dict[str, object] | None = None
+        best_v3_serialized = ""
+
+        for segment_size in segment_candidates:
+            segments: list[dict[str, object]] = []
+            for start in range(0, len(source), segment_size):
+                segment_index = start // max(segment_size, 1)
+                morton_key = _morton_key_1d(segment_index, lane=(c_nnz & 0x7))
+                chunk = source[start : start + segment_size]
+                cp = c_density * (1.0 + (morton_key & 0x3) * 0.03)
+                cr = c_radius * (1.0 + ((morton_key >> 2) & 0x3) * 0.02)
+                cn = max(0, round(c_nnz * (len(chunk) / max(len(source), 1))))
+                cn = max(0, round(cn * (1.0 + (((morton_key & 0x7) - 3) * 0.02))))
+                predictor, codec, compressed, params = _fit_best_segment_codec(
+                    chunk,
+                    coupling_density=cp,
+                    coupling_spectral_radius=cr,
+                    coupling_nnz=cn,
+                    morton_key=morton_key,
+                )
+                segment: dict[str, object] = {
                     "o": start,
                     "l": len(chunk),
                     "p": _PREDICTOR_ENCODE.get(predictor, predictor),
                     "c": _CODEC_ENCODE.get(codec, codec),
                     "r85": _encode_residual_blob(compressed),
                 }
-            )
-            if params:
-                segments[-1]["pp"] = params
+                if params:
+                    segment["pp"] = params
+                segments.append(segment)
 
-        payload_v3: dict[str, object] = {
-            "d": _DOMAIN_ENCODE.get(domain, domain),
-            "ss": segment_size,
-            "n": len(source),
-            "s": segments,
-        }
+            payload_v3: dict[str, object] = {
+                "d": _DOMAIN_ENCODE.get(domain, domain),
+                "ss": segment_size,
+                "n": len(source),
+                "s": segments,
+            }
+            serialized = _serialize_program_payload(payload_v3)
+            if not best_v3_serialized or len(serialized) < len(best_v3_serialized):
+                best_v3_serialized = serialized
+                best_v3_payload = payload_v3
 
-        payload_v2_serialized = _serialize_program_payload(payload_v2)
-        payload_v3_serialized = _serialize_program_payload(payload_v3)
-
-        if len(payload_v3_serialized) < len(payload_v2_serialized):
+        if best_v3_payload is not None and len(best_v3_serialized) < len(payload_v2_serialized):
             return {
                 "reconstructive_program_type": "latent-residual-v3",
-                "reconstructive_program_payload": payload_v3_serialized,
+                "reconstructive_program_payload": best_v3_serialized,
             }
 
         return {
@@ -437,12 +471,12 @@ def fit_reconstructive_program(
     if domain_kind == "logs":
         lines = canonical_text.split("\n")
         if not lines:
-            raise FormatError("No compact reconstructive logs program found")
+            return _latent_residual_program(canonical_text, domain=domain_kind)
 
         pattern = re.compile(r"^(.*:)(\d+)Z INFO core event=(\d+)$")
         m0 = pattern.match(lines[0])
         if not m0:
-            raise FormatError("No compact reconstructive logs program found")
+            return _latent_residual_program(canonical_text, domain=domain_kind)
 
         prefix = m0.group(1)
         width = len(m0.group(2))
@@ -450,13 +484,13 @@ def fit_reconstructive_program(
         for i, line in enumerate(lines):
             m = pattern.match(line)
             if not m:
-                raise FormatError("No compact reconstructive logs program found")
+                return _latent_residual_program(canonical_text, domain=domain_kind)
             if m.group(1) != prefix:
-                raise FormatError("No compact reconstructive logs program found")
+                return _latent_residual_program(canonical_text, domain=domain_kind)
             sec = int(m.group(2))
             event = int(m.group(3))
             if sec != i or event != i:
-                raise FormatError("No compact reconstructive logs program found")
+                return _latent_residual_program(canonical_text, domain=domain_kind)
 
         return {
             "reconstructive_program_type": "logs-seq-v1",
@@ -472,6 +506,56 @@ def fit_reconstructive_program(
     raise FormatError("Unsupported reconstructive domain")
 
 
+def _synthesize_discovered_equation_bytes(
+    *,
+    equation_family: str,
+    coefficients: list[int],
+    initial_state: list[int],
+    rollout_length: int,
+) -> bytes:
+    """Synthesize bytes for discovered equation families."""
+    out = bytearray(rollout_length)
+    if rollout_length == 0:
+        return b""
+    if not initial_state:
+        raise FormatError("Discovered equation initial_state must be non-empty")
+
+    x0 = initial_state[0] & 0xFF
+    out[0] = x0
+
+    if equation_family == "byte-constant-v1":
+        for i in range(1, rollout_length):
+            out[i] = x0
+        return bytes(out)
+
+    if equation_family == "byte-linear-mod-v1":
+        if len(coefficients) != 1:
+            raise FormatError("Invalid byte-linear-mod-v1 coefficient count")
+        step = coefficients[0] & 0xFF
+        for i in range(1, rollout_length):
+            out[i] = (out[i - 1] + step) & 0xFF
+        return bytes(out)
+
+    if equation_family == "byte-xor-step-v1":
+        if len(coefficients) != 1:
+            raise FormatError("Invalid byte-xor-step-v1 coefficient count")
+        step = coefficients[0] & 0xFF
+        for i in range(1, rollout_length):
+            out[i] = out[i - 1] ^ step
+        return bytes(out)
+
+    if equation_family == "byte-affine-recursion-v1":
+        if len(coefficients) != 2:
+            raise FormatError("Invalid byte-affine-recursion-v1 coefficient count")
+        a = coefficients[0] & 0xFF
+        b = coefficients[1] & 0xFF
+        for i in range(1, rollout_length):
+            out[i] = (a * out[i - 1] + b) & 0xFF
+        return bytes(out)
+
+    raise FormatError("Unsupported discovered equation family")
+
+
 def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
     """Synthesize canonical bytes from compact reconstructive program payload."""
     program_type = payload.get("reconstructive_program_type", "")
@@ -481,6 +565,39 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         raise FormatError("Missing reconstructive_program_payload")
 
     program = parse_reconstructive_program_payload(raw_program)
+
+    if program_type == "discovered-equation-v1":
+        equation_family = str(program.get("equation_family", ""))
+        coeffs_obj = program.get("coefficients", [])
+        initial_obj = program.get("initial_state", [])
+        rollout_length = _coerce_int_field(program.get("rollout_length", -1), field_name="rollout_length")
+
+        if not isinstance(coeffs_obj, list) or not isinstance(initial_obj, list):
+            raise FormatError("Invalid discovered equation payload")
+        if rollout_length < 0:
+            raise FormatError("Invalid discovered equation rollout length")
+
+        try:
+            coefficients = [int(v) for v in coeffs_obj]
+            initial_state = [int(v) for v in initial_obj]
+        except (TypeError, ValueError) as exc:
+            raise FormatError("Invalid discovered equation numeric payload") from exc
+
+        return _synthesize_discovered_equation_bytes(
+            equation_family=equation_family,
+            coefficients=coefficients,
+            initial_state=initial_state,
+            rollout_length=rollout_length,
+        )
+
+    if program_type == "discovered-braid-equation-v1":
+        parsed = parse_discovered_braid_program(program)
+        return _synthesize_discovered_equation_bytes(
+            equation_family=parsed.equation_family,
+            coefficients=parsed.coefficients,
+            initial_state=parsed.initial_state,
+            rollout_length=parsed.rollout_length,
+        )
 
     if program_type == "repeat-text-v1":
         unit_b64 = str(program.get("unit_b64", ""))
@@ -523,7 +640,7 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         )
         if predictor not in {"zero-v1", "prev-byte-v1", "spectral-byte-v1"}:
             raise FormatError("Unsupported latent residual predictor")
-        if codec not in {"zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}:
+        if codec not in {"raw-xor-v1", "zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}:
             raise FormatError("Unsupported latent residual codec")
         if original_length < 0:
             raise FormatError("Invalid latent residual program parameters")

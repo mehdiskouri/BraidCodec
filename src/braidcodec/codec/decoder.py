@@ -33,12 +33,10 @@ from braidcodec.codec.preprocessing import (
     recover_legacy_generators_v2,
 )
 from braidcodec.codec.reconstructive_compact import synthesize_reconstructive_bytes
-from braidcodec.codec.reconstructive_solver import validate_reconstructive_solver_payload
 from braidcodec.codec.reconstructive_transform import reconstructive_inverse_generators
 from braidcodec.codec.schema import (
-    validate_reconstructive_commitment_metadata,
-    validate_reconstructive_metadata,
-    validate_reconstructive_payload_metadata,
+    get_reconstructive_transport_code,
+    validate_reconstructive_compact_transport_metadata,
 )
 
 if TYPE_CHECKING:
@@ -245,12 +243,25 @@ def decode(
     sorted_blocks = sorted(stream.blocks, key=lambda b: b.block_index)
 
     mode = stream.metadata.get("preprocessing_mode")
+    transport_code = get_reconstructive_transport_code(stream.metadata)
+    reconstructive_mode = mode == "reconstructive" or bool(transport_code)
     reconstructive_payload: dict[str, str] | None = None
-    if mode == "reconstructive":
-        validate_reconstructive_metadata(stream.metadata)
-        reconstructive_payload = validate_reconstructive_payload_metadata(stream.metadata)
-        validate_reconstructive_commitment_metadata(stream.metadata, stream.blocks)
-        validate_reconstructive_solver_payload(reconstructive_payload)
+    if reconstructive_mode:
+        reconstructive_payload = validate_reconstructive_compact_transport_metadata(
+            stream.metadata,
+            stream.blocks,
+        )
+
+        if reconstructive_payload is not None and transport_code:
+            result = synthesize_reconstructive_bytes(reconstructive_payload)
+            actual_checksum = blake3.blake3(result).digest()
+            if actual_checksum != stream.checksum:
+                raise ChecksumError(
+                    "Reassembled data BLAKE3 checksum mismatch",
+                    expected=stream.checksum.hex(),
+                    actual=actual_checksum.hex(),
+                )
+            return result
 
         if not sorted_blocks:
             result = synthesize_reconstructive_bytes(reconstructive_payload)

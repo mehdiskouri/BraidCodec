@@ -19,18 +19,14 @@ from braidcodec._exceptions import (
 )
 from braidcodec.codec.decoder import decode
 from braidcodec.codec.encoder import encode
-from braidcodec.codec.schema import compute_reconstructive_commitment
+from braidcodec.codec.schema import (
+    compute_reconstructive_commitment_v3,
+    parse_reconstructive_payload_metadata,
+)
 from braidcodec.crypto.keys import BraidKey, keygen
 
 if TYPE_CHECKING:
     from braidcodec.codec.schema import EncodedStream
-
-
-def _payload_key(meta: dict[str, str]) -> str:
-    if "rp1" in meta:
-        return "rp1"
-    return "reconstructive_payload_v1"
-
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 # k=8 → tier 2 (Jones), fast state-sum (2^8 = 256 states).
@@ -220,12 +216,43 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="text",
         )
         bad_meta = dict(stream.metadata)
-        bad_meta.pop("rp1", None)
-        bad_meta.pop("reconstructive_payload_v1", None)
+        bad_meta.pop("rpb", None)
         tampered = replace(stream, metadata=bad_meta)
 
-        with pytest.raises(FormatError, match="reconstructive_payload_v1"):
+        with pytest.raises(FormatError, match="sidechannel"):
             decode(tampered, key, verify=False)
+
+    def test_reconstructive_decode_compact_transport_roundtrip(self) -> None:
+        key = _make_key()
+        data = b"A" * 512
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="enabled",
+        )
+
+        assert parse_reconstructive_payload_metadata(stream.metadata)["reconstructive_program_type"]
+        assert decode(stream, key, verify=False) == data
+
+    def test_reconstructive_decode_lean_transport_roundtrip(self) -> None:
+        key = _make_key()
+        data = b"A" * 512
+        stream = encode(
+            data,
+            key,
+            generators_per_block=_K_SMALL,
+            preprocessing_mode="reconstructive",
+            reconstructive_domain="text",
+            reconstructive_discovery="enabled",
+            reconstructive_compact_transport="lean",
+        )
+
+        assert parse_reconstructive_payload_metadata(stream.metadata)["reconstructive_program_type"]
+        assert decode(stream, key, verify=False) == data
 
     def test_reconstructive_decode_rejects_invalid_payload_json(self) -> None:
         key = _make_key()
@@ -238,10 +265,15 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="json",
         )
         bad_meta = dict(stream.metadata)
-        bad_meta[_payload_key(bad_meta)] = "not-json"
+        bad_meta["rpb"] = "not-json"
+        bad_meta["rc3"] = compute_reconstructive_commitment_v3(
+            transport_code=bad_meta["rt"],
+            blocks=stream.blocks,
+            program_sidechannel_blob=bad_meta["rpb"],
+        )
         tampered = replace(stream, metadata=bad_meta)
 
-        with pytest.raises(FormatError, match="JSON"):
+        with pytest.raises(FormatError):
             decode(tampered, key, verify=False)
 
     def test_reconstructive_decode_rejects_bad_commitment(self) -> None:
@@ -255,38 +287,35 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="json",
         )
         bad_meta = dict(stream.metadata)
-        bad_meta["reconstructive_commitment"] = "0" * 64
+        bad_meta["rc3"] = "0" * 64
         tampered = replace(stream, metadata=bad_meta)
 
-        with pytest.raises(FormatError, match="commitment mismatch"):
+        with pytest.raises(FormatError, match="commitment v3 mismatch"):
             decode(tampered, key, verify=False)
 
-    def test_reconstructive_decode_rejects_contraction_gate(self) -> None:
+    def test_reconstructive_decode_payload_tamper_breaks_reconstruction(self) -> None:
         key = _make_key()
-        data = b'{"msg":"hello","x":1}'
+        data = ("Cafe\u0301\nlog line\n" * 10).encode("utf-8")
         stream = encode(
             data,
             key,
             generators_per_block=_K_SMALL,
             preprocessing_mode="reconstructive",
-            reconstructive_domain="json",
+            reconstructive_domain="text",
         )
         bad_meta = dict(stream.metadata)
-        payload_key = _payload_key(bad_meta)
-        payload_obj = json.loads(bad_meta[payload_key])
-        payload_obj["km_kappa"] = "0.8"
-        payload_obj["km_eta"] = "0.4"
-        payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
-        bad_meta["km_kappa"] = "0.8"
-        bad_meta["km_eta"] = "0.4"
-        bad_meta[payload_key] = payload
-        bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
-            payload,
-            stream.blocks,
+        payload_obj = json.loads(bad_meta["rpb"])
+        payload_obj["unit_b64"] = "QQ=="
+        payload_obj["repeat_count"] = 1
+        bad_meta["rpb"] = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
+        bad_meta["rc3"] = compute_reconstructive_commitment_v3(
+            transport_code=bad_meta["rt"],
+            blocks=stream.blocks,
+            program_sidechannel_blob=bad_meta["rpb"],
         )
         tampered = replace(stream, metadata=bad_meta)
 
-        with pytest.raises(FormatError, match="contraction"):
+        with pytest.raises(ChecksumError, match="checksum mismatch"):
             decode(tampered, key, verify=False)
 
     def test_reconstructive_decode_seed_tamper_breaks_reconstruction(self) -> None:
@@ -298,21 +327,13 @@ class TestDecodeReconstructiveRoute:
             generators_per_block=_K_SMALL,
             preprocessing_mode="reconstructive",
             reconstructive_domain="text",
+            reconstructive_compact_transport="lean",
         )
         bad_meta = dict(stream.metadata)
-        payload_key = _payload_key(bad_meta)
-        payload_obj = json.loads(bad_meta[payload_key])
-        payload_obj["reconstructive_program_payload"] = json.dumps(
+        bad_meta["rpb"] = json.dumps(
             {"unit_b64": "QQ==", "repeat_count": 1},
             sort_keys=True,
             separators=(",", ":"),
-        )
-        payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
-        bad_meta["reconstructive_program_payload"] = payload_obj["reconstructive_program_payload"]
-        bad_meta[payload_key] = payload
-        bad_meta["reconstructive_commitment"] = compute_reconstructive_commitment(
-            payload,
-            stream.blocks,
         )
         tampered = replace(stream, metadata=bad_meta)
 

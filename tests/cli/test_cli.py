@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,9 +11,13 @@ from braidcodec.cli.main import (
     EXIT_FORMAT,
     EXIT_KEY_MISMATCH,
     EXIT_OK,
+    _failure_taxonomy_from_text,
     cli,
 )
-from braidcodec.codec.schema import EncodedStream, compute_reconstructive_commitment
+from braidcodec.codec.schema import (
+    EncodedStream,
+    parse_reconstructive_payload_metadata,
+)
 from braidcodec.crypto.keys import key_from_bytes, key_to_bytes, keygen
 
 if TYPE_CHECKING:
@@ -52,16 +55,8 @@ def encoded_file(key_file: Path, sample_file: Path, tmp_path: Path, runner: CliR
     )
     assert result.exit_code == EXIT_OK, result.output
     return out
-
-
-def _payload_key(meta: dict[str, str]) -> str:
-    if "rp1" in meta:
-        return "rp1"
-    return "reconstructive_payload_v1"
-
-
 def _tamper_reconstructive_payload_contraction(path: Path) -> None:
-    """Mutate reconstructive payload K_M params so contraction fails."""
+    """Mutate compact reconstructive metadata so decode/verify fails."""
     raw = path.read_bytes()
     if raw[:8] == b"\x89HDF\r\n\x1a\n" or path.suffix.lower() in {".h5", ".hdf5"}:
         stream = EncodedStream.from_hdf5_bytes(raw)
@@ -70,15 +65,12 @@ def _tamper_reconstructive_payload_contraction(path: Path) -> None:
         stream = EncodedStream.from_bytes(raw)
         is_hdf5 = False
     meta = dict(stream.metadata)
-    payload_key = _payload_key(meta)
-    payload_obj = json.loads(meta[payload_key])
-    payload_obj["km_kappa"] = "0.8"
-    payload_obj["km_eta"] = "0.4"
-    payload = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
-    meta["km_kappa"] = "0.8"
-    meta["km_eta"] = "0.4"
-    meta[payload_key] = payload
-    meta["reconstructive_commitment"] = compute_reconstructive_commitment(payload, stream.blocks)
+    if "rc3" in meta:
+        meta["rc3"] = "0" * 64
+    elif "rpb" in meta:
+        meta["rpb"] = "not-json"
+    else:
+        raise AssertionError("missing compact reconstructive metadata")
     tampered = EncodedStream(
         blocks=stream.blocks,
         n_strands=stream.n_strands,
@@ -155,6 +147,18 @@ class TestCliGroup:
         result = runner.invoke(cli, ["--help"])
         for cmd in ("keygen", "encode", "decode", "verify", "inspect", "benchmark"):
             assert cmd in result.output
+
+    def test_failure_taxonomy_strict_profile(self) -> None:
+        assert (
+            _failure_taxonomy_from_text("strict-gate-profile-failure: K_M convergence gate failed")
+            == "strict-gate-profile-failure"
+        )
+
+    def test_failure_taxonomy_discovery_required(self) -> None:
+        assert (
+            _failure_taxonomy_from_text("reconstructive discovery required but unavailable")
+            == "discovery-required-failure"
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -302,6 +306,94 @@ class TestEncode:
         assert result.exit_code == EXIT_OK
         assert out.exists()
         assert out.read_bytes()[:8] == b"\x89HDF\r\n\x1a\n"
+
+    def test_encode_reconstructive_compact_transport_enabled(
+        self, runner: CliRunner, key_file: Path, tmp_path: Path
+    ) -> None:
+        src = tmp_path / "discoverable.txt"
+        src.write_bytes(b"A" * 512)
+        out = tmp_path / "enc_compact.brdc"
+        result = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(src),
+                "-o",
+                str(out),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+                "--reconstructive-compact-transport",
+                "enabled",
+            ],
+        )
+        assert result.exit_code == EXIT_OK
+        stream = EncodedStream.from_bytes(out.read_bytes())
+        assert ("rh" in stream.metadata) or ("rt" in stream.metadata and "rpb" in stream.metadata)
+        assert "rc3" in stream.metadata
+        payload = parse_reconstructive_payload_metadata(stream.metadata)
+        assert payload["reconstructive_program_type"] == "discovered-braid-equation-v1"
+
+    def test_encode_reconstructive_compact_transport_lean(
+        self, runner: CliRunner, key_file: Path, tmp_path: Path
+    ) -> None:
+        src = tmp_path / "discoverable_lean.txt"
+        src.write_bytes(b"A" * 512)
+        out = tmp_path / "enc_compact_lean.brdc"
+        result = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(src),
+                "-o",
+                str(out),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+                "--reconstructive-compact-transport",
+                "lean",
+            ],
+        )
+        assert result.exit_code == EXIT_OK
+        stream = EncodedStream.from_bytes(out.read_bytes())
+        assert ("rh" in stream.metadata) or ("rt" in stream.metadata and "rpb" in stream.metadata)
+        assert "reconstructive_commitment" not in stream.metadata
+        payload = parse_reconstructive_payload_metadata(stream.metadata)
+        assert payload["reconstructive_program_type"] == "discovered-braid-equation-v1"
+
+    def test_encode_reconstructive_compact_transport_with_audit_bundle(
+        self, runner: CliRunner, key_file: Path, tmp_path: Path
+    ) -> None:
+        src = tmp_path / "discoverable_audit.txt"
+        src.write_bytes(b"A" * 512)
+        out = tmp_path / "enc_compact_audit.brdc"
+        result = runner.invoke(
+            cli,
+            [
+                "encode",
+                str(src),
+                "-o",
+                str(out),
+                "--key",
+                str(key_file),
+                "--preprocessing-mode",
+                "reconstructive",
+                "--reconstructive-domain",
+                "text",
+                "--reconstructive-compact-transport",
+                "enabled",
+                "--reconstructive-compact-audit-bundle",
+            ],
+        )
+        assert result.exit_code == EXIT_OK
+        stream = EncodedStream.from_bytes(out.read_bytes())
+        assert "ra1" in stream.metadata
 
 
 # ═════════════════════════════════════════════════════════════════════════
