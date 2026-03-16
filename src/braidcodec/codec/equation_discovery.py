@@ -16,7 +16,6 @@ from typing import Any, Literal, cast
 
 import blake3
 import numpy as np
-import sympy as sp  # type: ignore[import-untyped]
 
 from braidcodec.codec.braid_program_codec import compile_discovered_braid_program
 
@@ -99,9 +98,7 @@ def _discover_constant(values: list[int]) -> DiscoveredEquation | None:
     if any(v != first for v in values):
         return None
 
-    n = sp.Symbol("n", integer=True, nonnegative=True)
-    c = sp.Integer(first)
-    symbolic = str(sp.Eq(sp.Function("x")(n), c))
+    symbolic = f"x[n]={first}"
     return DiscoveredEquation(
         equation_family="byte-constant-v1",
         symbolic_form=symbolic,
@@ -121,10 +118,7 @@ def _discover_linear_mod(values: list[int]) -> DiscoveredEquation | None:
         if (values[i] - values[i - 1]) % 256 != step:
             return None
 
-    n = sp.Symbol("n", integer=True, nonnegative=True)
-    x0 = sp.Integer(values[0])
-    d = sp.Integer(step)
-    symbolic = str(sp.Eq(sp.Function("x")(n), sp.Mod(x0 + d * n, 256)))
+    symbolic = f"x[n]=({values[0]}+{step}*n) mod 256"
     return DiscoveredEquation(
         equation_family="byte-linear-mod-v1",
         symbolic_form=symbolic,
@@ -144,9 +138,7 @@ def _discover_xor_step(values: list[int]) -> DiscoveredEquation | None:
         if (values[i - 1] ^ step) != values[i]:
             return None
 
-    n = sp.Symbol("n", integer=True, nonnegative=True)
-    k = sp.Integer(step)
-    symbolic = str(sp.Eq(sp.Function("x")(n + 1), sp.Xor(sp.Function("x")(n), k)))
+    symbolic = f"x[n+1]=x[n] xor {step}"
     return DiscoveredEquation(
         equation_family="byte-xor-step-v1",
         symbolic_form=symbolic,
@@ -219,9 +211,13 @@ def _estimate_affine_candidates(
     x = np.asarray(values[:-1], dtype=np.float64).reshape(-1, 1)
     y = np.asarray(values[1:], dtype=np.float64)
 
-    sklearn_preprocessing = importlib.import_module("sklearn.preprocessing")
-    sklearn_linear_model = importlib.import_module("sklearn.linear_model")
-    scipy_optimize = importlib.import_module("scipy.optimize")
+    try:
+        sklearn_preprocessing = importlib.import_module("sklearn.preprocessing")
+        sklearn_linear_model = importlib.import_module("sklearn.linear_model")
+        scipy_optimize = importlib.import_module("scipy.optimize")
+    except Exception:
+        # Scientific stack is optional; deterministic exhaustive fallback remains available.
+        return []
 
     scaler = sklearn_preprocessing.StandardScaler()
     x_scaled = scaler.fit_transform(x)

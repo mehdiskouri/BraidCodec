@@ -33,11 +33,20 @@ reconstructive_discovery = [
     "scipy>=1.17.1",
     "joblib>=1.5.3",
 ]
+test = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-benchmark>=5.2.3",
+    "hypothesis>=6.151.9",
+    "click>=8.0",
+    "h5py>=3.13.0",
+]
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-benchmark>=5.2.3",
     "hypothesis>=6.151.9",
+    "h5py>=3.13.0",
     "mypy>=1.19.1",
     "ruff>=0.15.6",
     "pre-commit>=4.5.1",
