@@ -4,20 +4,21 @@ This folder contains a reproducible benchmark intended for public demonstrations
 
 ## What it does
 
-- Samples a deterministic subset of text files from:
-  - `README.md`
-  - `docs/*.md`
-  - `AGENT/PHASES/*.md`
-- Caps each sampled file to `64 KiB` to keep runs deterministic.
-- Builds a base corpus and benchmarks shard scaling with repeat factors: `x1`, `x4`, `x16`, `x64`.
-- Encodes each shard with BraidCodec reconstructive lean transport.
-- Reconstructs and verifies each shard for exactness.
+- Pulls text from `NeelNanda/pile-10k` (`default/train`) via Hugging Face datasets server.
+- Builds one non-duplicated corpus and benchmarks contiguous size slices at:
+  - `100KB`
+  - `200KB`
+  - `500KB`
+- Encodes each size slice with BraidCodec reconstructive lean transport.
+- Reconstructs and verifies each size slice for exactness.
 - Compares storage footprint with traditional baselines:
   - raw bytes
   - `gzip -9`
   - `zlib -9`
   - `lzma -9`
   - BraidCodec wire and HDF5 containers
+
+The script caches fetched corpus text in `benchmarks/public_showcase/neelnanda_pile_cache.txt` to make repeated runs deterministic and faster.
 
 ## Run
 
@@ -37,6 +38,6 @@ Each run writes both timestamped and latest copies:
 
 ## Interpretation notes
 
-- `exact_match` must stay `true` for every shard.
+- `exact_match` must stay `true` for every size point.
 - `braid_wire_vs_raw` below `1.0` means the wire format is smaller than raw bytes.
 - This benchmark is a storage+fidelity showcase, not a full throughput stress test.

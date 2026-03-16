@@ -117,7 +117,7 @@ Estimates assume serial encoding with `generators_per_block=32` on a single core
 
 ## Public Showcase Benchmark
 
-Use the public-facing benchmark to compare on-disk footprint and reconstruction fidelity against traditional storage baselines (`gzip`, `zlib`, `lzma`) on a deterministic Pile-like markdown subset. The run uses reconstructive `lean` transport and evaluates shard scaling (`x1`, `x4`, `x16`, `x64`).
+Use the public-facing benchmark to compare on-disk footprint and reconstruction fidelity against traditional storage baselines (`gzip`, `zlib`, `lzma`) on non-duplicated samples from `NeelNanda/pile-10k`. The run uses reconstructive `lean` transport and evaluates contiguous corpus sizes `100KB`, `200KB`, and `500KB`.
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/benchmark_public_showcase.py

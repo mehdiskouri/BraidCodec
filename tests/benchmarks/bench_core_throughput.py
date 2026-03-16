@@ -3,7 +3,7 @@
 Phase 6 core suite:
 - Excludes known stress regimes (e.g. n_strands=6 and 1MB cases).
 - Compares topology-first pipeline against legacy compatibility mode.
-- Reports delta versus recorded baseline means from AGENT/benchmark_outputs.md.
+- Reports delta versus recorded internal baseline means.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ _GPB = 16
 _MODES = ["legacy", "topology"]
 _LEGACY_WIRE_SIZE_BY_CASE: dict[tuple[int, int], int] = {}
 
-# Recorded baseline means (microseconds) from AGENT/benchmark_outputs.md.
+# Recorded baseline means (microseconds) from internal benchmark snapshots.
 _BASELINE_US: dict[tuple[int, int, str], float] = {
     (3, 10_240, "legacy"): 590_472.7606,
     (4, 10_240, "legacy"): 511_668.2494,

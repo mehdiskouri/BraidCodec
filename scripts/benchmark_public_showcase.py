@@ -7,6 +7,8 @@ import hashlib
 import json
 import lzma
 import time
+import urllib.parse
+import urllib.request
 import zlib
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -20,20 +22,20 @@ from braidcodec import decode, encode, keygen, verify
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "benchmarks" / "public_showcase"
 
-MAX_FILES = 12
-MAX_BYTES_PER_FILE = 64 * 1024
-SOURCE_GLOBS: tuple[str, ...] = (
-    "README.md",
-    "docs/*.md",
-    "AGENT/PHASES/*.md",
-)
-REPEAT_FACTORS: tuple[int, ...] = (1, 4, 16, 64)
+PILE_DATASET = "NeelNanda/pile-10k"
+PILE_CONFIG = "default"
+PILE_SPLIT = "train"
+TARGET_SIZES_BYTES: tuple[int, ...] = (100 * 1024, 200 * 1024, 500 * 1024)
+ROWS_PAGE_SIZE = 100
+MAX_FETCH_ROWS = 5000
+PILE_CACHE_PATH = OUTPUT_DIR / "neelnanda_pile_cache.txt"
 
 
 @dataclass(slots=True)
-class ShardBenchmarkRow:
-    repeat_factor: int
-    source_files: int
+class SizeBenchmarkRow:
+    target_bytes: int
+    target_label: str
+    source_rows: int
     raw_bytes: int
     gzip_bytes: int
     zlib_bytes: int
@@ -48,37 +50,70 @@ class ShardBenchmarkRow:
     decoded_sha256: str
 
 
-def _collect_subset() -> list[Path]:
-    found: list[Path] = []
-    seen: set[Path] = set()
-    for pattern in SOURCE_GLOBS:
-        for path in sorted(ROOT.glob(pattern)):
-            if not path.is_file():
-                continue
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            found.append(path)
-            if len(found) >= MAX_FILES:
-                return found
-    return found
+def _fetch_pile_rows(*, offset: int, length: int) -> list[str]:
+    params = urllib.parse.urlencode(
+        {
+            "dataset": PILE_DATASET,
+            "config": PILE_CONFIG,
+            "split": PILE_SPLIT,
+            "offset": offset,
+            "length": length,
+        }
+    )
+    url = f"https://datasets-server.huggingface.co/rows?{params}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "BraidCodec-public-showcase/1.0",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    out: list[str] = []
+    for item in payload.get("rows", []):
+        row_obj = item.get("row", {})
+        text = row_obj.get("text")
+        if isinstance(text, str) and text:
+            out.append(text)
+    return out
 
 
-def _sample_bytes(data: bytes) -> bytes:
-    if len(data) <= MAX_BYTES_PER_FILE:
-        return data
-    return data[:MAX_BYTES_PER_FILE]
+def _load_or_fetch_pile_corpus(max_bytes: int) -> tuple[bytes, int]:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if PILE_CACHE_PATH.exists():
+        cached = PILE_CACHE_PATH.read_bytes()
+        if len(cached) >= max_bytes:
+            return cached[:max_bytes], -1
 
-
-def _build_base_corpus(paths: list[Path]) -> bytes:
     chunks: list[bytes] = []
-    for path in paths:
-        relative = path.relative_to(ROOT).as_posix()
-        payload = _sample_bytes(path.read_bytes())
-        header = f"\n\n<<<SOURCE:{relative}>>>\n".encode()
-        chunks.append(header + payload)
-    return b"".join(chunks)
+    total = 0
+    offset = 0
+    rows_used = 0
+
+    while total < max_bytes and offset < MAX_FETCH_ROWS:
+        rows = _fetch_pile_rows(offset=offset, length=ROWS_PAGE_SIZE)
+        if not rows:
+            break
+        for text in rows:
+            block = text.encode("utf-8", errors="ignore") + b"\n"
+            chunks.append(block)
+            total += len(block)
+            rows_used += 1
+            if total >= max_bytes:
+                break
+        offset += ROWS_PAGE_SIZE
+
+    corpus = b"".join(chunks)
+    if len(corpus) < max_bytes:
+        raise RuntimeError(
+            f"Unable to fetch enough data from {PILE_DATASET}: "
+            f"got {len(corpus)} bytes, need {max_bytes}"
+        )
+
+    PILE_CACHE_PATH.write_bytes(corpus)
+    return corpus[:max_bytes], rows_used
 
 
 def _ratio(numerator: int, denominator: int) -> float:
@@ -87,18 +122,18 @@ def _ratio(numerator: int, denominator: int) -> float:
     return float(numerator) / float(denominator)
 
 
-def _run_shard_benchmark(
-    base_corpus: bytes,
+def _run_size_benchmark(
+    corpus: bytes,
     *,
-    repeat_factor: int,
-    source_files: int,
-) -> ShardBenchmarkRow:
-    shard = base_corpus * repeat_factor
+    target_bytes: int,
+    source_rows: int,
+) -> SizeBenchmarkRow:
+    sample = corpus[:target_bytes]
     key = keygen(sector="TSR", n_strands=4)
 
     encode_start = time.perf_counter()
     stream = encode(
-        shard,
+        sample,
         key,
         generators_per_block=8,
         preprocessing_mode="reconstructive",
@@ -117,40 +152,41 @@ def _run_shard_benchmark(
     verification = verify(stream, key)
     verify_ms = (time.perf_counter() - verify_start) * 1000.0
 
-    source_sha = hashlib.sha256(shard).hexdigest()
+    source_sha = hashlib.sha256(sample).hexdigest()
     decoded_sha = hashlib.sha256(decoded).hexdigest()
 
-    return ShardBenchmarkRow(
-        repeat_factor=repeat_factor,
-        source_files=source_files,
-        raw_bytes=len(shard),
-        gzip_bytes=len(gzip.compress(shard, compresslevel=9)),
-        zlib_bytes=len(zlib.compress(shard, level=9)),
-        lzma_bytes=len(lzma.compress(shard, preset=9)),
+    return SizeBenchmarkRow(
+        target_bytes=target_bytes,
+        target_label=f"{target_bytes // 1024}KB",
+        source_rows=source_rows,
+        raw_bytes=len(sample),
+        gzip_bytes=len(gzip.compress(sample, compresslevel=9)),
+        zlib_bytes=len(zlib.compress(sample, level=9)),
+        lzma_bytes=len(lzma.compress(sample, preset=9)),
         braid_wire_bytes=len(stream.to_bytes()),
         braid_hdf5_bytes=len(stream.to_hdf5_bytes()),
         encode_ms=round(encode_ms, 3),
         decode_ms=round(decode_ms, 3),
         verify_ms=round(verify_ms, 3),
-        exact_match=decoded == shard and verification.valid and source_sha == decoded_sha,
+        exact_match=decoded == sample and verification.valid and source_sha == decoded_sha,
         source_sha256=source_sha,
         decoded_sha256=decoded_sha,
     )
 
 
 def _build_plot(
-    rows: list[ShardBenchmarkRow],
+    rows: list[SizeBenchmarkRow],
     run_label: str,
     out_html: Path,
     out_png: Path,
 ) -> None:
-    labels = [f"x{r.repeat_factor}" for r in rows]
+    labels = [r.target_label for r in rows]
 
     fig = make_subplots(
         rows=2,
         cols=1,
         subplot_titles=(
-            "Storage footprint by shard size",
+            "Storage footprint by NeelNanda Pile subset size",
             "Compression ratio vs raw bytes",
         ),
         vertical_spacing=0.14,
@@ -210,7 +246,13 @@ def _build_plot(
         fig.write_image(str(out_png), scale=2)
 
 
-def _write_outputs(rows: list[ShardBenchmarkRow], started_at: datetime) -> dict[str, str]:
+def _write_outputs(
+    rows: list[SizeBenchmarkRow],
+    started_at: datetime,
+    *,
+    source_rows: int,
+    used_cache: bool,
+) -> dict[str, str]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     run_id = started_at.strftime("%Y%m%d_%H%M%S")
@@ -225,7 +267,7 @@ def _write_outputs(rows: list[ShardBenchmarkRow], started_at: datetime) -> dict[
 
     peak = rows[-1]
     headline = {
-        "repeat_factor": peak.repeat_factor,
+        "target_label": peak.target_label,
         "raw_bytes": peak.raw_bytes,
         "braid_wire_bytes": peak.braid_wire_bytes,
         "braid_wire_vs_raw": round(_ratio(peak.braid_wire_bytes, peak.raw_bytes), 4),
@@ -238,10 +280,15 @@ def _write_outputs(rows: list[ShardBenchmarkRow], started_at: datetime) -> dict[
     payload = {
         "run_id": run_id,
         "run_label": run_label,
-        "subset_source_globs": list(SOURCE_GLOBS),
-        "max_files": MAX_FILES,
-        "max_bytes_per_file": MAX_BYTES_PER_FILE,
-        "repeat_factors": list(REPEAT_FACTORS),
+        "data_source": {
+            "dataset": PILE_DATASET,
+            "config": PILE_CONFIG,
+            "split": PILE_SPLIT,
+            "cache_path": PILE_CACHE_PATH.relative_to(ROOT).as_posix(),
+            "used_cache": used_cache,
+            "source_rows": source_rows,
+        },
+        "target_sizes_bytes": list(TARGET_SIZES_BYTES),
         "totals": totals,
         "headline": headline,
         "rows": rows_dict,
@@ -276,17 +323,20 @@ def _write_outputs(rows: list[ShardBenchmarkRow], started_at: datetime) -> dict[
         "# Public Showcase Benchmark (Lean Path)",
         "",
         f"- Run: `{run_id}`",
-        f"- Repeat factors: `{', '.join(f'x{r.repeat_factor}' for r in rows)}`",
+        f"- Data source: `{PILE_DATASET}` (`{PILE_CONFIG}/{PILE_SPLIT}`)",
+        f"- Target sizes: `{', '.join(r.target_label for r in rows)}`",
+        f"- Source rows consumed: `{source_rows}`",
+        f"- Used local cache: `{used_cache}`",
         f"- All exact reconstruction matches: `{totals['all_exact']}`",
         (
-            f"- Headline (x{headline['repeat_factor']}): "
+            f"- Headline ({headline['target_label']}): "
             f"raw `{headline['raw_bytes']}` -> braid wire `{headline['braid_wire_bytes']}` "
             f"({headline['braid_wire_reduction_pct']:.2f}% reduction)"
         ),
         "",
-        "This benchmark uses a deterministic Pile-like subset of local markdown corpus, "
-        "builds progressively larger text shards, and compares BraidCodec lean transport "
-        "against traditional compressors while enforcing exact reconstruction quality.",
+        "This benchmark uses non-duplicated text sampled from NeelNanda's Pile subset "
+        "and compares BraidCodec lean transport against traditional compressors while "
+        "enforcing exact reconstruction quality.",
         "",
         "## Artifacts",
         "",
@@ -322,19 +372,26 @@ def _write_outputs(rows: list[ShardBenchmarkRow], started_at: datetime) -> dict[
 
 def main() -> None:
     started_at = datetime.now(UTC)
-    subset = _collect_subset()
-    if not subset:
-        raise RuntimeError("No source files found for showcase subset")
+    max_target = max(TARGET_SIZES_BYTES)
+    corpus, source_rows = _load_or_fetch_pile_corpus(max_target)
+    used_cache = source_rows < 0
+    if used_cache:
+        source_rows = 0
 
-    base = _build_base_corpus(subset)
     rows = [
-        _run_shard_benchmark(base, repeat_factor=repeat, source_files=len(subset))
-        for repeat in REPEAT_FACTORS
+        _run_size_benchmark(corpus, target_bytes=size, source_rows=source_rows)
+        for size in TARGET_SIZES_BYTES
     ]
-    outputs = _write_outputs(rows, started_at)
+    outputs = _write_outputs(
+        rows,
+        started_at,
+        source_rows=source_rows,
+        used_cache=used_cache,
+    )
 
     print("Public lean showcase benchmark complete")
-    print(f"Files sampled: {len(subset)}")
+    print(f"Dataset: {PILE_DATASET} ({PILE_CONFIG}/{PILE_SPLIT})")
+    print(f"Target sizes: {', '.join(r.target_label for r in rows)}")
     print(f"All exact matches: {all(r.exact_match for r in rows)}")
     print(
         "Headline reduction (%):",
