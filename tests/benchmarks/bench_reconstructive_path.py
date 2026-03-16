@@ -11,7 +11,6 @@ import json
 import time
 import zlib
 from base64 import b85decode
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -22,6 +21,8 @@ from braidcodec.codec.schema import parse_reconstructive_payload_metadata
 _DISCOVERED_PROGRAM_TYPES = {"discovered-equation-v1", "discovered-braid-equation-v1"}
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from pytest_benchmark.fixture import BenchmarkFixture
 
 
@@ -127,7 +128,9 @@ def test_reconstructive_encode_decode_verify(
     extra_info["wire_bytes"] = len(stream.to_bytes())
     extra_info["hdf5_bytes"] = len(stream.to_hdf5_bytes())
     extra_info["wire_compression_ratio"] = round(len(data) / max(len(stream.to_bytes()), 1), 6)
-    extra_info["hdf5_compression_ratio"] = round(len(data) / max(len(stream.to_hdf5_bytes()), 1), 6)
+    extra_info["hdf5_compression_ratio"] = round(
+        len(data) / max(len(stream.to_hdf5_bytes()), 1), 6
+    )
     extra_info["km_residual_max"] = float(audit.get("km_residual_max", "0"))
     extra_info["km_residual_mean"] = float(audit.get("km_residual_mean", "0"))
     extra_info["km_iters_mean"] = float(audit.get("km_iters_mean", "0"))
@@ -143,12 +146,16 @@ def test_reconstructive_encode_decode_verify(
 
     program_sidechannel = stream.metadata.get("rpb", "")
     if program_sidechannel:
-        extra_info["reconstructive_program_payload_bytes"] = len(program_sidechannel.encode("utf-8"))
+        extra_info["reconstructive_program_payload_bytes"] = len(
+            program_sidechannel.encode("utf-8")
+        )
     program_type = _program_type_from_stream(stream.metadata)
     if program_type:
         extra_info["reconstructive_program_type"] = program_type
         extra_info["used_discovered_equation"] = int(program_type in _DISCOVERED_PROGRAM_TYPES)
-        extra_info["used_residual_fallback"] = int(program_type in {"latent-residual-v2", "latent-residual-v3"})
+        extra_info["used_residual_fallback"] = int(
+            program_type in {"latent-residual-v2", "latent-residual-v3"}
+        )
     extra_info["compact_metadata_form"] = _compact_metadata_form(stream.metadata)
     extra_info["commitment_version"] = _commitment_version(stream.metadata)
 
@@ -208,7 +215,9 @@ def test_reconstructive_discovery_program_mix(
     extra_info["reconstructive_program_type"] = program_type
     program_sidechannel = stream.metadata.get("rpb", "")
     if program_sidechannel:
-        extra_info["reconstructive_program_payload_bytes"] = len(program_sidechannel.encode("utf-8"))
+        extra_info["reconstructive_program_payload_bytes"] = len(
+            program_sidechannel.encode("utf-8")
+        )
     extra_info["used_discovered_equation"] = int(used_discovered)
     extra_info["used_residual_fallback"] = int(
         program_type in {"latent-residual-v2", "latent-residual-v3"}

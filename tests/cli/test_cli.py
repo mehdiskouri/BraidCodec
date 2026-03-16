@@ -55,6 +55,8 @@ def encoded_file(key_file: Path, sample_file: Path, tmp_path: Path, runner: CliR
     )
     assert result.exit_code == EXIT_OK, result.output
     return out
+
+
 def _tamper_reconstructive_payload_contraction(path: Path) -> None:
     """Mutate compact reconstructive metadata so decode/verify fails."""
     raw = path.read_bytes()

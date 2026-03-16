@@ -295,9 +295,7 @@ class TestEncodePreprocessingModes:
         )
 
         assert len(topology.blocks) == len(legacy.blocks)
-        assert [b.block_index for b in topology.blocks] == [
-            b.block_index for b in legacy.blocks
-        ]
+        assert [b.block_index for b in topology.blocks] == [b.block_index for b in legacy.blocks]
         for tb, lb in zip(topology.blocks, legacy.blocks, strict=True):
             assert tb.generators != lb.generators
             assert tb.decode_generators is None
@@ -320,7 +318,9 @@ class TestEncodePreprocessingModes:
         assert stream.metadata["rt"].startswith("ps1.")
         assert "rpb" in stream.metadata
         assert "rc3" in stream.metadata
-        payload = validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
+        payload = validate_reconstructive_compact_transport_metadata(
+            stream.metadata, stream.blocks
+        )
         assert payload["reconstructive_program_type"]
         assert payload["reconstructive_program_payload"]
 
@@ -523,9 +523,7 @@ class TestEncodeReconstructiveCompactTransport:
             reconstructive_compact_transport="enabled",
         )
 
-        assert ("rh" in stream.metadata) or (
-            "rt" in stream.metadata and "rpb" in stream.metadata
-        )
+        assert ("rh" in stream.metadata) or ("rt" in stream.metadata and "rpb" in stream.metadata)
         assert "rc3" in stream.metadata
         assert "rtt" not in stream.metadata
         assert "rp1" not in stream.metadata
@@ -537,8 +535,7 @@ class TestEncodeReconstructiveCompactTransport:
         key = _make_key()
         stream = encode(
             (
-                "This freeform UTF-8 sentence resists deterministic byte-law discovery. "
-                * 10
+                "This freeform UTF-8 sentence resists deterministic byte-law discovery. " * 10
             ).encode("utf-8"),
             key,
             generators_per_block=_K_SMALL,

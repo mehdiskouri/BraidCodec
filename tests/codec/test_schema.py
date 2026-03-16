@@ -423,7 +423,10 @@ class TestReconstructivePayloadMetadata:
 
     def test_parse_compact_transport_payload_from_reconstructive_header(self) -> None:
         packed = b85encode(
-            zlib.compress(msgpack.packb({"t": "ps1.jl1", "p": '{"raw_json":"{}"}'}, use_bin_type=True), level=9)
+            zlib.compress(
+                msgpack.packb({"t": "ps1.jl1", "p": '{"raw_json":"{}"}'}, use_bin_type=True),
+                level=9,
+            )
         ).decode("ascii")
         meta = {
             "rh": f"~rh85:{packed}",

@@ -8,6 +8,7 @@ import zlib
 
 import pytest
 
+from braidcodec._exceptions import FormatError
 from braidcodec.codec.equation_discovery import (
     compile_discovered_braid_equation_program,
     compile_discovered_equation_program,
@@ -117,7 +118,7 @@ def test_discovery_braid_program_rejects_legacy_keys() -> None:
         "reconstructive_program_type": "discovered-braid-equation-v1",
         "reconstructive_program_payload": json.dumps(legacy_payload, separators=(",", ":")),
     }
-    with pytest.raises(Exception):
+    with pytest.raises((FormatError, ValueError, TypeError)):
         synthesize_reconstructive_bytes(legacy_program)
 
 
@@ -128,7 +129,9 @@ def test_discovery_braid_program_sidechannel_packed_payload_supported() -> None:
 
     program = compile_discovered_braid_equation_program(discovered.equation)
     raw_payload = program["reconstructive_program_payload"]
-    packed = "~sp85:" + base64.b85encode(zlib.compress(raw_payload.encode("utf-8"), level=9)).decode("ascii")
+    packed = "~sp85:" + base64.b85encode(
+        zlib.compress(raw_payload.encode("utf-8"), level=9)
+    ).decode("ascii")
     wrapped_program = {
         "reconstructive_program_type": "discovered-braid-equation-v1",
         "reconstructive_program_payload": packed,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import zlib
 from base64 import b85decode
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -16,6 +16,9 @@ from braidcodec.codec.equation_discovery import (
 )
 from braidcodec.codec.schema import parse_reconstructive_payload_metadata
 from braidcodec.crypto.keys import BraidKey, keygen
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_key() -> BraidKey:
@@ -46,7 +49,8 @@ def test_discovery_required_rejects_non_discoverable_payload() -> None:
     key = _make_key()
     # Natural language text is unlikely to match deterministic byte-family discovery.
     data = (
-        b"This is a free-form UTF-8 sample that should not match constant, linear, or affine byte laws. "
+        b"This is a free-form UTF-8 sample that should not match constant, "
+        b"linear, or affine byte laws. "
         b"It exists to exercise required discovery mode behavior."
     )
 
@@ -63,7 +67,8 @@ def test_discovery_required_rejects_non_discoverable_payload() -> None:
 def test_discovery_enabled_falls_back_when_no_equation() -> None:
     key = _make_key()
     data = (
-        b"Fallback behavior should remain correct when discovery cannot produce an exact governing equation."
+        b"Fallback behavior should remain correct when discovery cannot produce "
+        b"an exact governing equation."
     )
 
     stream = encode(

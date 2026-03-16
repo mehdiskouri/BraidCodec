@@ -235,7 +235,9 @@ class TestDecodeReconstructiveRoute:
             reconstructive_compact_transport="enabled",
         )
 
-        assert parse_reconstructive_payload_metadata(stream.metadata)["reconstructive_program_type"]
+        assert parse_reconstructive_payload_metadata(stream.metadata)[
+            "reconstructive_program_type"
+        ]
         assert decode(stream, key, verify=False) == data
 
     def test_reconstructive_decode_lean_transport_roundtrip(self) -> None:
@@ -251,7 +253,9 @@ class TestDecodeReconstructiveRoute:
             reconstructive_compact_transport="lean",
         )
 
-        assert parse_reconstructive_payload_metadata(stream.metadata)["reconstructive_program_type"]
+        assert parse_reconstructive_payload_metadata(stream.metadata)[
+            "reconstructive_program_type"
+        ]
         assert decode(stream, key, verify=False) == data
 
     def test_reconstructive_decode_rejects_invalid_payload_json(self) -> None:

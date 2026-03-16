@@ -98,7 +98,9 @@ def _parse_reconstructive_compact_header(metadata: Mapping[str, str]) -> dict[st
 
     obj: object
     try:
-        raw = zlib.decompress(b85decode(blob[len(_RECONSTRUCTIVE_HEADER_PREFIX) :].encode("ascii")))
+        raw = zlib.decompress(
+            b85decode(blob[len(_RECONSTRUCTIVE_HEADER_PREFIX) :].encode("ascii"))
+        )
         obj = msgpack.unpackb(raw, raw=False)
     except Exception as exc:
         raise FormatError("Invalid compact reconstructive header payload") from exc
@@ -1158,7 +1160,9 @@ def compute_reconstructive_commitment_v3(
     family, _ = _split_reconstructive_transport_code(transport_code)
     canonical_obj = {
         "embedded_blocks_digest": _compute_reconstructive_blocks_digest(blocks),
-        "program_sidechannel_digest": blake3.blake3(program_sidechannel_blob.encode("utf-8")).hexdigest()
+        "program_sidechannel_digest": blake3.blake3(
+            program_sidechannel_blob.encode("utf-8")
+        ).hexdigest()
         if program_sidechannel_blob
         else "",
         "schema_version": "3",
@@ -1167,5 +1171,3 @@ def compute_reconstructive_commitment_v3(
     }
     canonical_blob = json.dumps(canonical_obj, sort_keys=True, separators=(",", ":"))
     return blake3.blake3(canonical_blob.encode("utf-8")).hexdigest()
-
-

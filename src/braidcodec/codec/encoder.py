@@ -91,9 +91,7 @@ _TIER_2_MAX_GENERATORS: int = 12
 _VALID_PREPROCESSING_MODES: frozenset[str] = frozenset({"topology", "legacy", "reconstructive"})
 _RECONSTRUCTIVE_PAYLOAD_KEY = "reconstructive_payload_v1"
 _RECONSTRUCTIVE_PAYLOAD_KEY_SHORT = "rp1"
-_VALID_RECONSTRUCTIVE_COMPACT_TRANSPORT: frozenset[str] = frozenset(
-    {"enabled", "lean"}
-)
+_VALID_RECONSTRUCTIVE_COMPACT_TRANSPORT: frozenset[str] = frozenset({"enabled", "lean"})
 _PROGRAM_TYPE_TO_TRANSPORT_CODE: dict[str, str] = {
     "discovered-braid-equation-v1": "dbe1",
     "discovered-equation-v1": "de1",
@@ -149,9 +147,9 @@ def _pack_compact_sidechannel_blob(blob: str) -> str:
     """Pack compact sidechannel blob when shorter than raw payload."""
     if not blob:
         return blob
-    packed = _COMPACT_SIDECHANNEL_PACK_PREFIX + b85encode(zlib.compress(blob.encode("utf-8"), level=9)).decode(
-        "ascii"
-    )
+    packed = _COMPACT_SIDECHANNEL_PACK_PREFIX + b85encode(
+        zlib.compress(blob.encode("utf-8"), level=9)
+    ).decode("ascii")
     return packed if len(packed) < len(blob) else blob
 
 
@@ -165,7 +163,9 @@ def _pack_compact_reconstructive_header(*, transport_code: str, sidechannel_blob
         },
         use_bin_type=True,
     )
-    packed = _COMPACT_RECON_HEADER_PREFIX + b85encode(zlib.compress(bytes(packed_obj), level=9)).decode("ascii")
+    packed = _COMPACT_RECON_HEADER_PREFIX + b85encode(
+        zlib.compress(bytes(packed_obj), level=9)
+    ).decode("ascii")
 
     legacy_json = json.dumps(
         {
@@ -181,9 +181,9 @@ def _pack_compact_reconstructive_header(*, transport_code: str, sidechannel_blob
 def _pack_compact_reconstructive_audit_bundle(audit_bundle: dict[str, str]) -> str:
     """Pack optional compact reconstructive audit bundle into one metadata field."""
     payload = json.dumps(audit_bundle, sort_keys=True, separators=(",", ":"))
-    packed = _COMPACT_AUDIT_BUNDLE_PREFIX + b85encode(zlib.compress(payload.encode("utf-8"), level=9)).decode(
-        "ascii"
-    )
+    packed = _COMPACT_AUDIT_BUNDLE_PREFIX + b85encode(
+        zlib.compress(payload.encode("utf-8"), level=9)
+    ).decode("ascii")
     return packed if len(packed) < len(payload) else payload
 
 
@@ -197,7 +197,9 @@ def _build_compact_reconstructive_audit_bundle(metadata: dict[str, str]) -> dict
     return audit
 
 
-def _select_compact_transport_metadata(*, transport_code: str, sidechannel_blob: str) -> dict[str, str]:
+def _select_compact_transport_metadata(
+    *, transport_code: str, sidechannel_blob: str
+) -> dict[str, str]:
     """Choose the smallest metadata representation for compact transport."""
     header = _pack_compact_reconstructive_header(
         transport_code=transport_code,
@@ -231,6 +233,7 @@ def _resolve_km_thresholds(
     if normalized == "strict-v1":
         return 1e-3, 0.9, True
     raise ValueError("reconstructive_strict_gate_profile must be one of: default-v1, strict-v1")
+
 
 _BlockTask = tuple[
     list[int],
@@ -685,8 +688,8 @@ def _compact_reconstructive_metadata(
 
     try:
         payload_obj = json.loads(payload_json)
-    except Exception:
-        raise ValueError("reconstructive compact transport payload invalid")
+    except Exception as exc:
+        raise ValueError("reconstructive compact transport payload invalid") from exc
 
     if not isinstance(payload_obj, dict):
         raise ValueError("reconstructive compact transport payload shape invalid")
@@ -702,7 +705,9 @@ def _compact_reconstructive_metadata(
         raise ValueError("reconstructive compact transport program type unsupported")
 
     packed_sidechannel = _pack_compact_sidechannel_blob(sidechannel)
-    audit_bundle = _build_compact_reconstructive_audit_bundle(metadata) if include_audit_bundle else {}
+    audit_bundle = (
+        _build_compact_reconstructive_audit_bundle(metadata) if include_audit_bundle else {}
+    )
 
     if compact_mode == "lean":
         transport_code = f"ps2.{type_code}"
@@ -711,7 +716,9 @@ def _compact_reconstructive_metadata(
             sidechannel_blob=packed_sidechannel,
         )
         if audit_bundle:
-            compact_meta[_RECONSTRUCTIVE_AUDIT_KEY_SHORT] = _pack_compact_reconstructive_audit_bundle(audit_bundle)
+            compact_meta[_RECONSTRUCTIVE_AUDIT_KEY_SHORT] = (
+                _pack_compact_reconstructive_audit_bundle(audit_bundle)
+            )
         return (
             compact_meta,
             transport_code,
@@ -724,7 +731,9 @@ def _compact_reconstructive_metadata(
         sidechannel_blob=packed_sidechannel,
     )
     if audit_bundle:
-        compact_meta[_RECONSTRUCTIVE_AUDIT_KEY_SHORT] = _pack_compact_reconstructive_audit_bundle(audit_bundle)
+        compact_meta[_RECONSTRUCTIVE_AUDIT_KEY_SHORT] = _pack_compact_reconstructive_audit_bundle(
+            audit_bundle
+        )
     return (
         compact_meta,
         transport_code,
@@ -944,7 +953,9 @@ def _build_reconstructive_metadata(
             )
             if discovery.equation is not None:
                 try:
-                    candidate_program = compile_discovered_braid_equation_program(discovery.equation)
+                    candidate_program = compile_discovered_braid_equation_program(
+                        discovery.equation
+                    )
                 except Exception:
                     # Keep backward-compatible path if braid lift fails unexpectedly.
                     candidate_program = compile_discovered_equation_program(discovery.equation)

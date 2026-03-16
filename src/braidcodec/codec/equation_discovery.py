@@ -16,7 +16,7 @@ from typing import Any, Literal, cast
 
 import blake3
 import numpy as np
-import sympy as sp
+import sympy as sp  # type: ignore[import-untyped]
 
 from braidcodec.codec.braid_program_codec import compile_discovered_braid_program
 
@@ -83,8 +83,12 @@ def _resolve_profile(profile_id: str) -> DiscoveryProfile:
     return _DEFAULT_PROFILE
 
 
-def _symbolic_hash(symbolic_form: str, coefficients: tuple[int, ...], initial: tuple[int, ...]) -> str:
-    payload = f"{symbolic_form}|{','.join(str(v) for v in coefficients)}|{','.join(str(v) for v in initial)}"
+def _symbolic_hash(
+    symbolic_form: str, coefficients: tuple[int, ...], initial: tuple[int, ...]
+) -> str:
+    coeff_blob = ",".join(str(v) for v in coefficients)
+    initial_blob = ",".join(str(v) for v in initial)
+    payload = f"{symbolic_form}|{coeff_blob}|{initial_blob}"
     return blake3.blake3(payload.encode("utf-8")).hexdigest()
 
 
@@ -202,7 +206,9 @@ def _affine_exact_match(values: list[int], a: int, b: int) -> bool:
     return True
 
 
-def _estimate_affine_candidates(values: list[int], profile: DiscoveryProfile) -> list[tuple[int, int]]:
+def _estimate_affine_candidates(
+    values: list[int], profile: DiscoveryProfile
+) -> list[tuple[int, int]]:
     """Estimate affine map candidates using sklearn, scipy, and PySINDy.
 
     Returned candidates are ordered deterministically for exact verification.
@@ -258,7 +264,10 @@ def _estimate_affine_candidates(values: list[int], profile: DiscoveryProfile) ->
                 candidates.append((aa, bb))
 
     refined_x = np.asarray(getattr(refined, "x", np.asarray([w, b], dtype=np.float64)))
-    _append_neighborhood(int(round(float(refined_x[0]))) % 256, int(round(float(refined_x[1]))) % 256)
+    _append_neighborhood(
+        round(float(refined_x[0])) % 256,
+        round(float(refined_x[1])) % 256,
+    )
 
     # PySINDy-assisted discrete map estimate (best-effort; deterministic settings).
     try:
@@ -277,7 +286,7 @@ def _estimate_affine_candidates(values: list[int], profile: DiscoveryProfile) ->
             # Discrete map with degree-1 polynomial library -> [1, x] coefficients.
             c0 = float(coef[0, 0])
             c1 = float(coef[0, 1])
-            _append_neighborhood(int(round(c1)) % 256, int(round(c0)) % 256)
+            _append_neighborhood(round(c1) % 256, round(c0) % 256)
     except Exception:
         # Keep deterministic fallback behavior even if PySINDy fit fails.
         pass
@@ -325,7 +334,9 @@ def compile_discovered_equation_program(equation: DiscoveredEquation) -> dict[st
 
     return {
         "reconstructive_program_type": "discovered-equation-v1",
-        "reconstructive_program_payload": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        "reconstructive_program_payload": json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ),
     }
 
 
@@ -348,7 +359,9 @@ def compile_discovered_braid_equation_program(equation: DiscoveredEquation) -> d
 
     return {
         "reconstructive_program_type": "discovered-braid-equation-v1",
-        "reconstructive_program_payload": packed_payload if len(packed_payload) < len(json_payload) else json_payload,
+        "reconstructive_program_payload": packed_payload
+        if len(packed_payload) < len(json_payload)
+        else json_payload,
     }
 
 

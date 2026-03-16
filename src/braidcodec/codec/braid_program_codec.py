@@ -120,7 +120,9 @@ def _unpack_generators_from_b85(blob: str, expected_count: int) -> list[int]:
         digits.append(value & 0xF)
 
     if len(digits) < expected_count:
-        raise FormatError("Compact braid payload too short", expected=expected_count, actual=len(digits))
+        raise FormatError(
+            "Compact braid payload too short", expected=expected_count, actual=len(digits)
+        )
 
     used = digits[:expected_count]
     tail = digits[expected_count:]
@@ -172,6 +174,8 @@ def parse_discovered_braid_program(program: dict[str, object]) -> DiscoveredEqua
     family_code_obj = program.get("e")
     if family_code_obj is None:
         raise FormatError("Missing discovered braid equation family code")
+    if not isinstance(family_code_obj, int | str | bytes | bytearray):
+        raise FormatError("Unsupported discovered braid equation code")
     try:
         equation_family = _CODE_TO_FAMILY[int(family_code_obj)]
     except Exception as exc:
@@ -182,6 +186,11 @@ def parse_discovered_braid_program(program: dict[str, object]) -> DiscoveredEqua
     sector = str(program.get("bs", "Identity"))
     generators_obj = program.get("braid_generators", [])
     generators_b85 = program.get("g", "")
+
+    if not isinstance(rollout_raw, int | str | bytes | bytearray):
+        raise FormatError("Invalid discovered braid numeric payload")
+    if not isinstance(n_strands_raw, int | str | bytes | bytearray):
+        raise FormatError("Invalid discovered braid numeric payload")
 
     try:
         rollout_length = int(rollout_raw)

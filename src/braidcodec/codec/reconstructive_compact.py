@@ -114,7 +114,9 @@ def parse_reconstructive_program_payload(raw_payload: str) -> dict[str, object]:
     if raw_payload.startswith(_SIDEBAND_PACK_PREFIX):
         encoded = raw_payload[len(_SIDEBAND_PACK_PREFIX) :]
         try:
-            raw_payload = zlib.decompress(base64.b85decode(encoded.encode("ascii"))).decode("utf-8")
+            raw_payload = zlib.decompress(base64.b85decode(encoded.encode("ascii"))).decode(
+                "utf-8"
+            )
         except Exception as exc:
             raise FormatError("Invalid packed sidechannel reconstructive program payload") from exc
 
@@ -321,6 +323,7 @@ def fit_reconstructive_program(
     coupling_nnz: int | None = None,
 ) -> dict[str, str]:
     """Fit a compact deterministic reconstruction program for canonical text."""
+
     def _latent_residual_program(raw_text: str, *, domain: DomainKind) -> dict[str, str]:
         source = raw_text.encode("utf-8")
         c_density = float(coupling_density or 0.0)
@@ -570,7 +573,9 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         equation_family = str(program.get("equation_family", ""))
         coeffs_obj = program.get("coefficients", [])
         initial_obj = program.get("initial_state", [])
-        rollout_length = _coerce_int_field(program.get("rollout_length", -1), field_name="rollout_length")
+        rollout_length = _coerce_int_field(
+            program.get("rollout_length", -1), field_name="rollout_length"
+        )
 
         if not isinstance(coeffs_obj, list) or not isinstance(initial_obj, list):
             raise FormatError("Invalid discovered equation payload")

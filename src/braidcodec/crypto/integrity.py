@@ -234,7 +234,9 @@ def _check_checksum(
     )
     if reconstructive_mode:
         try:
-            payload = validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
+            payload = validate_reconstructive_compact_transport_metadata(
+                stream.metadata, stream.blocks
+            )
             reassembled = synthesize_reconstructive_bytes(payload)
         except (ValueError, TypeError, OverflowError, FormatError):
             return False, "BLAKE3 checksum failed: cannot reconstruct compact stream"
@@ -374,8 +376,7 @@ def _check_topology(
                 )
 
         if synthesis_version != "2" and (
-            block.topology_dt_scale is None
-            or abs(block.topology_dt_scale - p.dt_scale) > 1e-12
+            block.topology_dt_scale is None or abs(block.topology_dt_scale - p.dt_scale) > 1e-12
         ):
             failed.add(block.block_index)
             details.append(
@@ -395,7 +396,9 @@ def _decode_generators_for_block(stream: EncodedStream, block: EncodedBlock) -> 
 
     mode = stream.metadata.get("preprocessing_mode")
     if mode == "reconstructive":
-        payload = validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
+        payload = validate_reconstructive_compact_transport_metadata(
+            stream.metadata, stream.blocks
+        )
         seed_vector = payload.get("km_seed_vector", "")
         return reconstructive_inverse_generators(
             block.generators,

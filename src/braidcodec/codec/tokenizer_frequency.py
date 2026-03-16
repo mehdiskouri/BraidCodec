@@ -70,9 +70,7 @@ def _build_bin_table(
 
 
 _BIN_TABLE = _build_bin_table()
-_BIN_TABLE_HASH = blake3.blake3(
-    b"".join(struct.pack(">d", x) for x in _BIN_TABLE)
-).hexdigest()
+_BIN_TABLE_HASH = blake3.blake3(b"".join(struct.pack(">d", x) for x in _BIN_TABLE)).hexdigest()
 
 
 def _phoneme_tag(value: str) -> str | None:

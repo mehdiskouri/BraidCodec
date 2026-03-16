@@ -146,6 +146,7 @@ def morton_key_2d(layer_index: int, block_index: int) -> int:
         bit += 1
     return out
 
+
 def morton_key_1d(block_index: int, lane: int = 0) -> int:
     """Compute a 1D Morton-like key for block ordering within a lane.
 
@@ -180,6 +181,7 @@ def topology_commitment(
     ).encode("ascii")
     digest = blake3.blake3(payload).digest(length=8)
     return int.from_bytes(digest, byteorder="big", signed=False)
+
 
 def topology_commitment_v2(
     *,
@@ -260,6 +262,7 @@ def compute_bfps(chunk: bytes) -> BinaryFixedPointSignature:
         variance_fp=round(variance_norm * 65535.0),
     )
 
+
 def synthesize_topology_generators_v2(
     *,
     generators: list[int],
@@ -290,6 +293,7 @@ def synthesize_topology_generators_v2(
         derived.append(sign * new_abs)
 
     return derived
+
 
 def recover_legacy_generators_v2(
     *,

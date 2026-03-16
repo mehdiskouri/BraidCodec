@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 _K_SMALL: int = 8  # tier 2 (Jones)
 _K_DEFAULT: int = 32  # tier 3 (trace)
+
+
 def _make_key(sector: str = "TSR", theta_offset: float = 1.0, n_strands: int = 4) -> BraidKey:
     return keygen(sector=sector, n_strands=n_strands, theta_offset=theta_offset)
 

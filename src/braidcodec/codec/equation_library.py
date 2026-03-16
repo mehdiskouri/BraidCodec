@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,11 +40,11 @@ class CandidateLibraryStore:
         parsed_obj = json.loads(raw)
         if not isinstance(parsed_obj, dict):
             return {}
-        parsed = cast("dict[Any, Any]", parsed_obj)
+        parsed: dict[Any, Any] = parsed_obj
         out: dict[str, dict[str, str]] = {}
         for key, value in parsed.items():
             if isinstance(key, str) and isinstance(value, dict):
-                value_map = cast("dict[Any, Any]", value)
+                value_map: dict[Any, Any] = value
                 normalized: dict[str, str] = {}
                 for raw_k, raw_v in value_map.items():
                     normalized[str(raw_k)] = str(raw_v)
