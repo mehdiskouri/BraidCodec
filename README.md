@@ -117,7 +117,7 @@ Estimates assume serial encoding with `generators_per_block=32` on a single core
 
 ## Public Showcase Benchmark
 
-Use the public-facing benchmark to compare on-disk footprint and reconstruction fidelity against traditional storage baselines (gzip, zlib, lzma) on a deterministic subset of project docs (Pile-like text corpus sample).
+Use the public-facing benchmark to compare on-disk footprint and reconstruction fidelity against traditional storage baselines (`gzip`, `zlib`, `lzma`) on a deterministic Pile-like markdown subset. The run uses reconstructive `lean` transport and evaluates shard scaling (`x1`, `x4`, `x16`, `x64`).
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/benchmark_public_showcase.py
@@ -129,8 +129,9 @@ Artifacts are written to `benchmarks/public_showcase/`:
 - `latest_table.csv` and timestamped `showcase_*.csv`
 - `latest_report.md` and timestamped `showcase_*.md`
 - `latest_plot.html` and timestamped `showcase_*.html`
+- `latest_plot.png` and timestamped `showcase_*.png`
 
-This is intended for public demos where you want to show one reproducible run with exact reconstruction checks and compact footprint comparisons.
+This is intended for public demos where you want to show one reproducible run with exact reconstruction checks and compact footprint comparisons. Open `benchmarks/public_showcase/latest_plot.png` directly in VS Code for a rendered chart.
 
 ## Architecture
 
