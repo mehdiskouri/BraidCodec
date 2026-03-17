@@ -19,6 +19,10 @@ from braidcodec._exceptions import (
 )
 from braidcodec.codec.decoder import decode
 from braidcodec.codec.encoder import encode
+from braidcodec.codec.reconstructive_compact import (
+    parse_reconstructive_program_payload,
+    serialize_reconstructive_program_sidechannel,
+)
 from braidcodec.codec.schema import (
     compute_reconstructive_commitment_v3,
     parse_reconstructive_payload_metadata,
@@ -308,10 +312,18 @@ class TestDecodeReconstructiveRoute:
             reconstructive_domain="text",
         )
         bad_meta = dict(stream.metadata)
-        payload_obj = json.loads(bad_meta["rpb"])
+        payload_obj = parse_reconstructive_program_payload(bad_meta["rpb"])
         payload_obj["unit_b64"] = "QQ=="
         payload_obj["repeat_count"] = 1
-        bad_meta["rpb"] = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
+        original_sidechannel = bad_meta["rpb"]
+        mutated_json = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
+        mutated_binary = serialize_reconstructive_program_sidechannel(payload_obj)
+        if isinstance(original_sidechannel, bytes) and len(mutated_binary) < len(
+            mutated_json.encode("utf-8")
+        ):
+            bad_meta["rpb"] = mutated_binary
+        else:
+            bad_meta["rpb"] = mutated_json
         bad_meta["rc3"] = compute_reconstructive_commitment_v3(
             transport_code=bad_meta["rt"],
             blocks=stream.blocks,

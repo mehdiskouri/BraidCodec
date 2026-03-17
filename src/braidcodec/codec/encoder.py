@@ -64,7 +64,10 @@ from braidcodec.codec.preprocessing import (
     topology_commitment_v2,
 )
 from braidcodec.codec.reconstructive_compact import (
+    _decode_residual_blob,
     fit_reconstructive_program,
+    parse_reconstructive_program_payload,
+    serialize_reconstructive_program_sidechannel,
     synthesize_reconstructive_bytes,
 )
 from braidcodec.codec.reconstructive_transform import reconstructive_forward_generators
@@ -96,11 +99,14 @@ _PROGRAM_TYPE_TO_TRANSPORT_CODE: dict[str, str] = {
     "discovered-braid-equation-v1": "dbe1",
     "discovered-equation-v1": "de1",
     "repeat-text-v1": "rt1",
+    "token-delta-grammar-v1": "td1",
+    "phrase-dictionary-v1": "pd1",
     "json-linear-items-v1": "jli1",
     "json-literal-v1": "jl1",
     "logs-seq-v1": "ls1",
     "latent-residual-v2": "lr2",
     "latent-residual-v3": "lr3",
+    "sparse-corrective-v1": "lr4",
 }
 _COMPACT_SIDECHANNEL_PACK_PREFIX = "~sp85:"
 _COMPACT_RECON_HEADER_PREFIX = "~rh85:"
@@ -143,17 +149,22 @@ def _transport_family(code: str) -> str:
     return code
 
 
-def _pack_compact_sidechannel_blob(blob: str) -> str:
+def _pack_compact_sidechannel_blob(blob: str | bytes) -> str | bytes:
     """Pack compact sidechannel blob when shorter than raw payload."""
     if not blob:
         return blob
+    if isinstance(blob, bytes):
+        compressed = zlib.compress(blob, level=9)
+        return compressed if len(compressed) < len(blob) else blob
     packed = _COMPACT_SIDECHANNEL_PACK_PREFIX + b85encode(
         zlib.compress(blob.encode("utf-8"), level=9)
     ).decode("ascii")
     return packed if len(packed) < len(blob) else blob
 
 
-def _pack_compact_reconstructive_header(*, transport_code: str, sidechannel_blob: str) -> str:
+def _pack_compact_reconstructive_header(
+    *, transport_code: str, sidechannel_blob: str | bytes
+) -> str:
     """Pack compact reconstructive transport header into one metadata field."""
     msgpack_mod = importlib.import_module("msgpack")
     packed_obj = msgpack_mod.packb(
@@ -166,6 +177,9 @@ def _pack_compact_reconstructive_header(*, transport_code: str, sidechannel_blob
     packed = _COMPACT_RECON_HEADER_PREFIX + b85encode(
         zlib.compress(bytes(packed_obj), level=9)
     ).decode("ascii")
+
+    if isinstance(sidechannel_blob, bytes):
+        return packed
 
     legacy_json = json.dumps(
         {
@@ -187,19 +201,23 @@ def _pack_compact_reconstructive_audit_bundle(audit_bundle: dict[str, str]) -> s
     return packed if len(packed) < len(payload) else payload
 
 
-def _build_compact_reconstructive_audit_bundle(metadata: dict[str, str]) -> dict[str, str]:
+def _build_compact_reconstructive_audit_bundle(
+    metadata: dict[str, str | bytes],
+) -> dict[str, str]:
     """Build optional audit bundle for compact reconstructive streams."""
     audit: dict[str, str] = {}
     for key in _RECONSTRUCTIVE_AUDIT_KEYS:
         value = metadata.get(key, "")
         if value:
-            audit[key] = value
+            audit[key] = (
+                value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else str(value)
+            )
     return audit
 
 
 def _select_compact_transport_metadata(
-    *, transport_code: str, sidechannel_blob: str
-) -> dict[str, str]:
+    *, transport_code: str, sidechannel_blob: str | bytes
+) -> dict[str, str | bytes]:
     """Choose the smallest metadata representation for compact transport."""
     header = _pack_compact_reconstructive_header(
         transport_code=transport_code,
@@ -345,9 +363,10 @@ def _encode_batch(batch: list[_BlockTask]) -> list[EncodedBlock]:
     return [_encode_block(*task) for task in batch]
 
 
-def _get_reconstructive_payload_blob(metadata: dict[str, str]) -> str:
+def _get_reconstructive_payload_blob(metadata: dict[str, str | bytes]) -> str:
     """Return reconstructive payload blob from current compact key."""
-    return metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT, "")
+    value = metadata.get(_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT, "")
+    return value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else str(value)
 
 
 # ── Public API ────────────────────────────────────────────────────────────
@@ -426,7 +445,7 @@ def encode(
     chunk_by_index = {idx: (chunk, orig_len) for idx, chunk, orig_len in chunks}
     profile_elapsed = 0.0
     layer_order_elapsed = 0.0
-    reconstructive_meta: dict[str, str] = {}
+    reconstructive_meta: dict[str, str | bytes] = {}
     reconstructive_seed_vector: str | None = None
 
     if preprocessing_mode == "reconstructive":
@@ -447,7 +466,14 @@ def encode(
             compact_mode=compact_mode,
             include_audit_bundle=reconstructive_compact_audit_bundle,
         )
-        reconstructive_seed_vector = reconstructive_meta.get("km_seed_vector")
+        seed_obj = reconstructive_meta.get("km_seed_vector")
+        reconstructive_seed_vector = (
+            seed_obj.decode("utf-8", errors="ignore")
+            if isinstance(seed_obj, bytes)
+            else str(seed_obj)
+            if seed_obj is not None
+            else None
+        )
 
         if not compact_transport_code:
             raise ValueError("reconstructive compact transport payload unavailable")
@@ -458,7 +484,10 @@ def encode(
         }
         transport_code = compact_transport_code
         transport_family = _transport_family(transport_code)
-        commitment_sidechannel = compact_transport_sidechannel or str(metadata.get("rpb", ""))
+        metadata_sidechannel = metadata.get("rpb", "")
+        commitment_sidechannel = compact_transport_sidechannel or (
+            metadata_sidechannel if isinstance(metadata_sidechannel, str | bytes) else ""
+        )
         if transport_family != "ps2":
             metadata["rc3"] = compute_reconstructive_commitment_v3(
                 transport_code=transport_code,
@@ -675,11 +704,11 @@ def _build_reconstructive_fidelity_bundle(
 
 
 def _compact_reconstructive_metadata(
-    metadata: dict[str, str],
+    metadata: dict[str, str | bytes],
     *,
     compact_mode: str,
     include_audit_bundle: bool,
-) -> tuple[dict[str, str], str, str]:
+) -> tuple[dict[str, str | bytes], str, str | bytes]:
     """Collapse reconstructive metadata to enabled/lean compact transport form."""
 
     payload_json = _get_reconstructive_payload_blob(metadata)
@@ -696,7 +725,8 @@ def _compact_reconstructive_metadata(
 
     payload_obj_typed = cast("dict[str, object]", payload_obj)
     program_type = str(payload_obj_typed.get("reconstructive_program_type", ""))
-    sidechannel = str(metadata.get("rpb", ""))
+    sidechannel_obj = metadata.get("rpb", "")
+    sidechannel = sidechannel_obj if isinstance(sidechannel_obj, str | bytes) else ""
     if not program_type or not sidechannel:
         raise ValueError("reconstructive compact transport payload unavailable")
 
@@ -770,7 +800,7 @@ def _build_reconstructive_metadata(
     discovery_mode: str = "enabled",
     discovery_profile_id: str = "default-v1",
     library_path: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, str | bytes]:
     """Compute deterministic reconstructive metadata contract payload."""
     tokenizer = FrequencyTokenizerV1()
     normalizer = OscillatorNormalizationV1()
@@ -840,7 +870,7 @@ def _build_reconstructive_metadata(
         coupling=coupling,
     )
 
-    metadata: dict[str, str] = {
+    metadata: dict[str, str | bytes] = {
         **tokenized.metadata,
         **normalized.metadata,
         **manifold_metadata(state),
@@ -868,7 +898,6 @@ def _build_reconstructive_metadata(
         **fidelity_bundle,
     }
 
-    full_metadata = {"preprocessing_mode": "reconstructive", **metadata}
     if domain in {"text", "json", "logs"}:
         try:
             program_source_text = data.decode("utf-8")
@@ -1000,15 +1029,58 @@ def _build_reconstructive_metadata(
 
     # Side-channel large program payload to avoid JSON-escape overhead inside
     # reconstructive_payload_v1 while keeping decode contract backward-compatible.
-    program_payload = metadata.get("reconstructive_program_payload", "")
+    program_payload_obj = metadata.get("reconstructive_program_payload", "")
+    program_payload = (
+        program_payload_obj.decode("utf-8", errors="ignore")
+        if isinstance(program_payload_obj, bytes)
+        else str(program_payload_obj)
+    )
     if program_payload:
-        metadata["rpb"] = program_payload
+        sidechannel: str | bytes = program_payload
+        try:
+            parsed_program = parse_reconstructive_program_payload(program_payload)
+            program_type = str(metadata.get("reconstructive_program_type", ""))
+            if program_type == "latent-residual-v2":
+                parsed_program = dict(parsed_program)
+                parsed_program["rb"] = _decode_residual_blob(parsed_program)
+                parsed_program.pop("r85", None)
+                parsed_program.pop("residual_b85", None)
+            elif program_type == "latent-residual-v3":
+                parsed_program = dict(parsed_program)
+                raw_segments = parsed_program.get("s", parsed_program.get("segments", []))
+                if isinstance(raw_segments, list):
+                    canonical_segments: list[dict[str, object]] = []
+                    for raw_segment in raw_segments:
+                        if not isinstance(raw_segment, dict):
+                            canonical_segments.append(raw_segment)
+                            continue
+                        canonical_segment = dict(raw_segment)
+                        canonical_segment["rb"] = _decode_residual_blob(canonical_segment)
+                        canonical_segment.pop("r85", None)
+                        canonical_segment.pop("residual_b85", None)
+                        canonical_segments.append(canonical_segment)
+                    if "s" in parsed_program:
+                        parsed_program["s"] = canonical_segments
+                    else:
+                        parsed_program["segments"] = canonical_segments
+            packed_sidechannel = serialize_reconstructive_program_sidechannel(parsed_program)
+            if len(packed_sidechannel) < len(program_payload.encode("utf-8")):
+                sidechannel = packed_sidechannel
+        except Exception:
+            sidechannel = program_payload
+        metadata["rpb"] = sidechannel
         metadata["reconstructive_program_payload"] = "@"
 
-    full_metadata = {"preprocessing_mode": "reconstructive", **metadata}
-    validate_reconstructive_metadata(full_metadata)
+    full_metadata_str: dict[str, str] = {
+        "preprocessing_mode": "reconstructive",
+        **{
+            key: value.decode("utf-8", errors="ignore") if isinstance(value, bytes) else str(value)
+            for key, value in metadata.items()
+        },
+    }
+    validate_reconstructive_metadata(full_metadata_str)
     metadata[_RECONSTRUCTIVE_PAYLOAD_KEY_SHORT] = build_reconstructive_payload_metadata(
-        full_metadata
+        full_metadata_str
     )
     # Top-level program fields are no longer needed after payload bundle construction.
     metadata.pop("reconstructive_program_type", None)

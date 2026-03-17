@@ -18,6 +18,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from braidcodec import decode, encode, keygen, verify
+from braidcodec.codec.schema import parse_reconstructive_payload_metadata
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "benchmarks" / "public_showcase"
@@ -48,6 +49,23 @@ class SizeBenchmarkRow:
     exact_match: bool
     source_sha256: str
     decoded_sha256: str
+    reconstructive_program_type: str
+    used_discovered_equation: bool
+    used_fallback_residual: bool
+    reconstructive_program_payload_bytes: int
+    wire_vs_gzip_ratio: float
+
+
+_DISCOVERED_PROGRAM_TYPES = {"discovered-equation-v1", "discovered-braid-equation-v1"}
+_FALLBACK_PROGRAM_TYPES = {"latent-residual-v2", "latent-residual-v3", "sparse-corrective-v1"}
+
+
+def _program_type_from_stream(metadata: dict[str, str]) -> str:
+    try:
+        payload = parse_reconstructive_payload_metadata(metadata)
+    except Exception:
+        return ""
+    return str(payload.get("reconstructive_program_type", ""))
 
 
 def _fetch_pile_rows(*, offset: int, length: int) -> list[str]:
@@ -154,6 +172,14 @@ def _run_size_benchmark(
 
     source_sha = hashlib.sha256(sample).hexdigest()
     decoded_sha = hashlib.sha256(decoded).hexdigest()
+    program_type = _program_type_from_stream(stream.metadata)
+    sidechannel = stream.metadata.get("rpb", "")
+    if isinstance(sidechannel, bytes):
+        program_payload_bytes = len(sidechannel)
+    elif isinstance(sidechannel, str):
+        program_payload_bytes = len(sidechannel.encode("utf-8"))
+    else:
+        program_payload_bytes = 0
 
     return SizeBenchmarkRow(
         target_bytes=target_bytes,
@@ -171,6 +197,11 @@ def _run_size_benchmark(
         exact_match=decoded == sample and verification.valid and source_sha == decoded_sha,
         source_sha256=source_sha,
         decoded_sha256=decoded_sha,
+        reconstructive_program_type=program_type,
+        used_discovered_equation=program_type in _DISCOVERED_PROGRAM_TYPES,
+        used_fallback_residual=program_type in _FALLBACK_PROGRAM_TYPES,
+        reconstructive_program_payload_bytes=program_payload_bytes,
+        wire_vs_gzip_ratio=round(_ratio(len(stream.to_bytes()), len(gzip.compress(sample, 9))), 6),
     )
 
 

@@ -26,7 +26,8 @@ def test_commitment_v2_binds_program_sidechannel() -> None:
     validate_reconstructive_compact_transport_metadata(stream.metadata, stream.blocks)
 
     tampered = dict(stream.metadata)
-    tampered["rpb"] = tampered["rpb"] + "A"
+    sidechannel = tampered["rpb"]
+    tampered["rpb"] = sidechannel + (b"A" if isinstance(sidechannel, bytes) else "A")
 
     with pytest.raises(FormatError, match="commitment v3 mismatch"):
         validate_reconstructive_compact_transport_metadata(tampered, stream.blocks)

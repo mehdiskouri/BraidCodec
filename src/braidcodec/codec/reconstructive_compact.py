@@ -12,16 +12,22 @@ import json
 import lzma
 import re
 import zlib
-from typing import Literal
+from collections import Counter
+from typing import TYPE_CHECKING, Literal
 
 import msgpack
 
 from braidcodec._exceptions import FormatError
 from braidcodec.codec.braid_program_codec import parse_discovered_braid_program
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 DomainKind = Literal["text", "json", "logs"]
 _PACK_PREFIX = "~mp85:"
 _SIDEBAND_PACK_PREFIX = "~sp85:"
+_PACK_BIN_COMPRESSED_PREFIX = b"mpz1:"
+_PACK_BIN_RAW_PREFIX = b"mp1:"
 _PREDICTOR_ENCODE: dict[str, str] = {"zero-v1": "z", "prev-byte-v1": "p", "spectral-byte-v1": "s"}
 _PREDICTOR_DECODE: dict[str, str] = {v: k for k, v in _PREDICTOR_ENCODE.items()}
 _CODEC_ENCODE: dict[str, str] = {
@@ -29,6 +35,7 @@ _CODEC_ENCODE: dict[str, str] = {
     "zlib-xor-v1": "z",
     "bz2-xor-v1": "b",
     "lzma-xor-v1": "l",
+    "lzma2raw-xor-v1": "x",
 }
 _CODEC_DECODE: dict[str, str] = {v: k for k, v in _CODEC_ENCODE.items()}
 _DOMAIN_ENCODE: dict[str, str] = {"text": "t", "json": "j", "logs": "l"}
@@ -47,6 +54,24 @@ def _compress_lzma(data: bytes) -> bytes:
     return lzma.compress(data, preset=9)
 
 
+_LZMA2RAW_FILTERS = [
+    {
+        "id": lzma.FILTER_LZMA2,
+        "dict_size": 1 << 20,
+        "lc": 4,
+        "lp": 0,
+        "pb": 0,
+        "mode": lzma.MODE_NORMAL,
+        "mf": lzma.MF_BT4,
+        "nice_len": 273,
+    }
+]
+
+
+def _compress_lzma2raw(data: bytes) -> bytes:
+    return lzma.compress(data, format=lzma.FORMAT_RAW, filters=_LZMA2RAW_FILTERS)
+
+
 def _compress_by_codec(codec_name: str, data: bytes) -> bytes:
     if codec_name == "raw-xor-v1":
         return data
@@ -56,6 +81,8 @@ def _compress_by_codec(codec_name: str, data: bytes) -> bytes:
         return _compress_bz2(data)
     if codec_name == "lzma-xor-v1":
         return _compress_lzma(data)
+    if codec_name == "lzma2raw-xor-v1":
+        return _compress_lzma2raw(data)
     raise FormatError("Unsupported latent residual codec")
 
 
@@ -68,6 +95,8 @@ def _decompress_by_codec(codec_name: str, data: bytes) -> bytes:
         return bz2.decompress(data)
     if codec_name == "lzma-xor-v1":
         return lzma.decompress(data)
+    if codec_name == "lzma2raw-xor-v1":
+        return lzma.decompress(data, format=lzma.FORMAT_RAW, filters=_LZMA2RAW_FILTERS)
     raise FormatError("Unsupported latent residual codec")
 
 
@@ -89,7 +118,13 @@ def _encode_residual_blob(data: bytes) -> str:
 
 
 def _decode_residual_blob(program: dict[str, object]) -> bytes:
-    """Decode residual bytes from payload (base85 compact encoding)."""
+    """Decode residual bytes from payload (binary or base85 encoding)."""
+    raw_bin = program.get("residual_bytes", program.get("rb"))
+    if isinstance(raw_bin, bytes):
+        return raw_bin
+    if isinstance(raw_bin, bytearray):
+        return bytes(raw_bin)
+
     raw_b85 = program.get("residual_b85", program.get("r85"))
     if isinstance(raw_b85, str) and raw_b85:
         try:
@@ -102,15 +137,63 @@ def _decode_residual_blob(program: dict[str, object]) -> bytes:
 
 def _serialize_program_payload(program: dict[str, object]) -> str:
     """Serialize reconstructive program payload with compact binary fallback."""
-    json_payload = json.dumps(program, sort_keys=True, separators=(",", ":"))
+    json_payload = ""
+    try:
+        json_payload = json.dumps(program, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        # Program contains binary fields; packed path is required.
+        json_payload = ""
     packed = msgpack.packb(program, use_bin_type=True)
     packed_blob = base64.b85encode(zlib.compress(packed, level=9)).decode("ascii")
     packed_payload = _PACK_PREFIX + packed_blob
+    if not json_payload:
+        return packed_payload
     return packed_payload if len(packed_payload) < len(json_payload) else json_payload
 
 
-def parse_reconstructive_program_payload(raw_payload: str) -> dict[str, object]:
+def serialize_reconstructive_program_sidechannel(program: dict[str, object]) -> bytes:
+    """Serialize reconstructive program sidechannel for compact transport.
+
+    The binary envelope avoids base85 overhead for large latent residual payloads.
+    """
+    packed = bytes(msgpack.packb(program, use_bin_type=True))
+    compressed = bytes(zlib.compress(packed, level=9))
+    if len(compressed) + len(_PACK_BIN_COMPRESSED_PREFIX) < (
+        len(packed) + len(_PACK_BIN_RAW_PREFIX)
+    ):
+        return _PACK_BIN_COMPRESSED_PREFIX + compressed
+    return _PACK_BIN_RAW_PREFIX + packed
+
+
+def parse_reconstructive_program_payload(raw_payload: str | bytes) -> dict[str, object]:
     """Parse reconstructive program payload from JSON or packed base85 blob."""
+    if isinstance(raw_payload, bytes):
+        if raw_payload.startswith(_PACK_BIN_COMPRESSED_PREFIX):
+            body = raw_payload[len(_PACK_BIN_COMPRESSED_PREFIX) :]
+            try:
+                decoded = msgpack.unpackb(zlib.decompress(body), raw=False)
+            except Exception as exc:
+                raise FormatError("Invalid compressed binary reconstructive payload") from exc
+            if not isinstance(decoded, dict):
+                raise FormatError("Binary reconstructive payload must decode to object")
+            return {str(k): v for k, v in decoded.items()}
+
+        if raw_payload.startswith(_PACK_BIN_RAW_PREFIX):
+            body = raw_payload[len(_PACK_BIN_RAW_PREFIX) :]
+            try:
+                decoded = msgpack.unpackb(body, raw=False)
+            except Exception as exc:
+                raise FormatError("Invalid binary reconstructive payload") from exc
+            if not isinstance(decoded, dict):
+                raise FormatError("Binary reconstructive payload must decode to object")
+            return {str(k): v for k, v in decoded.items()}
+
+        # Legacy or non-prefixed payloads may still be UTF-8 text.
+        try:
+            raw_payload = raw_payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FormatError("Unsupported binary reconstructive payload encoding") from exc
+
     if raw_payload.startswith(_SIDEBAND_PACK_PREFIX):
         encoded = raw_payload[len(_SIDEBAND_PACK_PREFIX) :]
         try:
@@ -214,10 +297,10 @@ def _fit_best_segment_codec(
     )
     predictors.append(("spectral-byte-v1", spectral_pred, spectral_params))
 
-    codecs = ["raw-xor-v1", "zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"]
+    codecs = ["raw-xor-v1", "zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1", "lzma2raw-xor-v1"]
     nnz_signal = coupling_nnz / max(len(source), 1)
     if coupling_density > 0.08 or coupling_spectral_radius > 25.0 or nnz_signal > 8.0:
-        codecs = ["bz2-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
+        codecs = ["bz2-xor-v1", "lzma2raw-xor-v1", "lzma-xor-v1", "zlib-xor-v1"]
     if (morton_key & 1) == 1:
         codecs = [codecs[1], codecs[0], codecs[2]]
 
@@ -314,6 +397,309 @@ def _smallest_repeat_unit(text: str) -> tuple[str, int] | None:
     return None
 
 
+def _tokenize_text_pieces(text: str) -> list[str]:
+    """Split text into reversible token pieces (words/whitespace/punctuation)."""
+    if not text:
+        return []
+    return re.findall(r"\w+|\s+|[^\w\s]", text)
+
+
+def _fit_token_delta_program(text: str) -> dict[str, str] | None:
+    """Build token-delta program for recurring token transitions.
+
+    Returns None when token vocabulary does not provide useful reuse.
+    """
+    pieces = _tokenize_text_pieces(text)
+    if len(pieces) < 8:
+        return None
+
+    token_counts = Counter(
+        p for p in pieces if p and p[0].isalnum() and len(p) >= 3 and p.strip() == p
+    )
+    vocab = [t for t, c in token_counts.most_common(96) if c >= 3]
+    if len(vocab) < 8:
+        return None
+
+    vocab_index = {token: i for i, token in enumerate(vocab)}
+    delta_stream: list[int | None] = []
+    literals: list[str] = []
+    prev_idx = 0
+
+    for piece in pieces:
+        idx = vocab_index.get(piece)
+        if idx is None:
+            delta_stream.append(None)
+            literals.append(piece)
+            continue
+        delta_stream.append(idx - prev_idx)
+        prev_idx = idx
+
+    payload = {
+        "v": vocab,
+        "d": delta_stream,
+        "l": literals,
+    }
+    return {
+        "reconstructive_program_type": "token-delta-grammar-v1",
+        "reconstructive_program_payload": _serialize_program_payload(payload),
+    }
+
+
+def _synthesize_token_delta_program(program: dict[str, object]) -> bytes:
+    """Decode token-delta grammar payload back to original text bytes."""
+    raw_vocab = program.get("v", [])
+    raw_deltas = program.get("d", [])
+    raw_literals = program.get("l", [])
+    if (
+        not isinstance(raw_vocab, list)
+        or not isinstance(raw_deltas, list)
+        or not isinstance(raw_literals, list)
+    ):
+        raise FormatError("Invalid token-delta grammar payload")
+
+    vocab = [str(v) for v in raw_vocab]
+    literals = [str(v) for v in raw_literals]
+    literal_cursor = 0
+    prev_idx = 0
+    out: list[str] = []
+
+    for item in raw_deltas:
+        if item is None:
+            if literal_cursor >= len(literals):
+                raise FormatError("token-delta literal stream underflow")
+            out.append(literals[literal_cursor])
+            literal_cursor += 1
+            continue
+
+        if not isinstance(item, int | str):
+            raise FormatError("Invalid token-delta delta value")
+        delta = int(item)
+        idx = prev_idx + delta
+        if idx < 0 or idx >= len(vocab):
+            raise FormatError("token-delta index out of range")
+        out.append(vocab[idx])
+        prev_idx = idx
+
+    if literal_cursor != len(literals):
+        raise FormatError("token-delta literal stream overflow")
+    return "".join(out).encode("utf-8")
+
+
+def _fit_phrase_dictionary_program(text: str) -> dict[str, str] | None:
+    """Build a phrase-dictionary recurrence program for repeated n-grams."""
+    tokens = re.findall(r"\S+\s*", text)
+    if len(tokens) < 16:
+        return None
+
+    counts: Counter[tuple[str, ...]] = Counter()
+    for n in (2, 3, 4):
+        for i in range(0, len(tokens) - n + 1):
+            phrase = tuple(tokens[i : i + n])
+            phrase_bytes = "".join(phrase).encode("utf-8")
+            if len(phrase_bytes) >= 12:
+                counts[phrase] += 1
+
+    phrases = [p for p, c in counts.most_common(48) if c >= 3]
+    if not phrases:
+        return None
+
+    # Keep longer and more frequent phrases first for greedy packing.
+    phrases = sorted(
+        phrases,
+        key=lambda p: (-(len(p)), -counts[p], "".join(p)),
+    )
+    phrase_strings = ["".join(p) for p in phrases]
+
+    marks: list[int] = []
+    literals: list[str] = []
+    i = 0
+    while i < len(tokens):
+        best_idx = -1
+        best_len = 0
+        for p_idx, phrase in enumerate(phrases):
+            plen = len(phrase)
+            if plen <= best_len:
+                continue
+            if i + plen <= len(tokens) and tuple(tokens[i : i + plen]) == phrase:
+                best_idx = p_idx
+                best_len = plen
+        if best_idx >= 0:
+            marks.append(best_idx)
+            i += best_len
+            continue
+
+        marks.append(-1)
+        literals.append(tokens[i])
+        i += 1
+
+    payload = {
+        "p": phrase_strings,
+        "m": marks,
+        "l": literals,
+    }
+    return {
+        "reconstructive_program_type": "phrase-dictionary-v1",
+        "reconstructive_program_payload": _serialize_program_payload(payload),
+    }
+
+
+def _synthesize_phrase_dictionary_program(program: dict[str, object]) -> bytes:
+    """Decode phrase dictionary payload back to original text bytes."""
+    raw_phrases = program.get("p", [])
+    raw_marks = program.get("m", [])
+    raw_literals = program.get("l", [])
+    if (
+        not isinstance(raw_phrases, list)
+        or not isinstance(raw_marks, list)
+        or not isinstance(raw_literals, list)
+    ):
+        raise FormatError("Invalid phrase dictionary payload")
+
+    phrases = [str(v) for v in raw_phrases]
+    literals = [str(v) for v in raw_literals]
+    literal_cursor = 0
+    out: list[str] = []
+
+    for marker in raw_marks:
+        if not isinstance(marker, int | str):
+            raise FormatError("Invalid phrase dictionary marker")
+        idx = int(marker)
+        if idx == -1:
+            if literal_cursor >= len(literals):
+                raise FormatError("phrase dictionary literal stream underflow")
+            out.append(literals[literal_cursor])
+            literal_cursor += 1
+            continue
+        if idx < 0 or idx >= len(phrases):
+            raise FormatError("phrase dictionary index out of range")
+        out.append(phrases[idx])
+
+    if literal_cursor != len(literals):
+        raise FormatError("phrase dictionary literal stream overflow")
+    return "".join(out).encode("utf-8")
+
+
+def _fit_sparse_corrective_program(
+    *,
+    source_text: str,
+    base_program: dict[str, str],
+) -> dict[str, str] | None:
+    """Build sparse corrective residual over a generative base program.
+
+    The generated payload stores sparse XOR patches against the base output.
+    """
+    source = source_text.encode("utf-8")
+    base = synthesize_reconstructive_bytes(base_program)
+    if len(base) != len(source):
+        return None
+
+    mismatch = [i for i, (a, b) in enumerate(zip(source, base, strict=False)) if a != b]
+    if not mismatch:
+        return None
+
+    # Sparse residuals only: skip if mismatch density is too high.
+    if len(mismatch) / max(len(source), 1) > 0.35:
+        return None
+
+    patches: list[dict[str, object]] = []
+    start = mismatch[0]
+    prev = start
+    for idx in mismatch[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        chunk = bytes(source[i] ^ base[i] for i in range(start, prev + 1))
+        patches.append({"o": start, "x85": _encode_residual_blob(chunk)})
+        start = idx
+        prev = idx
+    chunk = bytes(source[i] ^ base[i] for i in range(start, prev + 1))
+    patches.append({"o": start, "x85": _encode_residual_blob(chunk)})
+
+    payload = {
+        "n": len(source),
+        "bt": base_program.get("reconstructive_program_type", ""),
+        "bp": base_program.get("reconstructive_program_payload", ""),
+        "px": patches,
+    }
+    return {
+        "reconstructive_program_type": "sparse-corrective-v1",
+        "reconstructive_program_payload": _serialize_program_payload(payload),
+    }
+
+
+def _synthesize_sparse_corrective_program(program: dict[str, object]) -> bytes:
+    """Decode sparse corrective payload by applying XOR patches to base output."""
+    raw_len = program.get("n", -1)
+    base_type = str(program.get("bt", ""))
+    base_payload = str(program.get("bp", ""))
+    patches_obj = program.get("px", [])
+    if not isinstance(raw_len, int | str):
+        raise FormatError("Invalid sparse corrective payload length")
+    target_len = int(raw_len)
+    if target_len < 0:
+        raise FormatError("Invalid sparse corrective payload length")
+    if not base_type or not base_payload:
+        raise FormatError("Invalid sparse corrective base program")
+    if not isinstance(patches_obj, list):
+        raise FormatError("Invalid sparse corrective patch payload")
+
+    base_bytes = synthesize_reconstructive_bytes(
+        {
+            "reconstructive_program_type": base_type,
+            "reconstructive_program_payload": base_payload,
+        }
+    )
+    if len(base_bytes) != target_len:
+        raise FormatError("Sparse corrective base length mismatch")
+
+    out = bytearray(base_bytes)
+    for patch in patches_obj:
+        if not isinstance(patch, dict):
+            raise FormatError("Invalid sparse corrective patch entry")
+        offset = _coerce_int_field(patch.get("o", -1), field_name="patch offset")
+        xor_blob = patch.get("x85", "")
+        if not isinstance(xor_blob, str) or not xor_blob:
+            raise FormatError("Invalid sparse corrective patch data")
+        try:
+            delta = base64.b85decode(xor_blob.encode("ascii"))
+        except Exception as exc:
+            raise FormatError("Invalid sparse corrective patch encoding") from exc
+        end = offset + len(delta)
+        if offset < 0 or end > len(out):
+            raise FormatError("Sparse corrective patch out of bounds")
+        for i, value in enumerate(delta):
+            out[offset + i] ^= value
+
+    return bytes(out)
+
+
+def _select_smallest_exact_program(
+    *,
+    source_text: str,
+    candidates: list[dict[str, str]],
+) -> dict[str, str]:
+    """Select smallest candidate that reconstructs source exactly."""
+    source_bytes = source_text.encode("utf-8")
+    best: dict[str, str] | None = None
+    best_len: int | None = None
+
+    for candidate in candidates:
+        try:
+            reconstructed = synthesize_reconstructive_bytes(candidate)
+        except Exception:
+            continue
+        if reconstructed != source_bytes:
+            continue
+        payload_len = len(candidate.get("reconstructive_program_payload", "").encode("utf-8"))
+        if best is None or best_len is None or payload_len < best_len:
+            best = candidate
+            best_len = payload_len
+
+    if best is None:
+        raise FormatError("No exact reconstructive program candidate available")
+    return best
+
+
 def fit_reconstructive_program(
     canonical_text: str,
     *,
@@ -348,12 +734,28 @@ def fit_reconstructive_program(
             "p": _PREDICTOR_ENCODE.get(best_predictor, best_predictor),
             "c": _CODEC_ENCODE.get(best_codec, best_codec),
             "n": len(source),
-            "r85": _encode_residual_blob(best_compressed),
+            "rb": best_compressed,
         }
         if best_predictor_params:
             payload_v2["pp"] = best_predictor_params
 
-        payload_v2_serialized = _serialize_program_payload(payload_v2)
+        payload_v2_legacy: dict[str, object] = {
+            "d": _DOMAIN_ENCODE.get(domain, domain),
+            "p": _PREDICTOR_ENCODE.get(best_predictor, best_predictor),
+            "c": _CODEC_ENCODE.get(best_codec, best_codec),
+            "n": len(source),
+            "r85": _encode_residual_blob(best_compressed),
+        }
+        if best_predictor_params:
+            payload_v2_legacy["pp"] = best_predictor_params
+
+        payload_v2_serialized_bin = _serialize_program_payload(payload_v2)
+        payload_v2_serialized_legacy = _serialize_program_payload(payload_v2_legacy)
+        payload_v2_serialized = (
+            payload_v2_serialized_bin
+            if len(payload_v2_serialized_bin) <= len(payload_v2_serialized_legacy)
+            else payload_v2_serialized_legacy
+        )
 
         # Segment-pack v3: evaluate multiple chunk granularities and pick the
         # smallest final serialized payload.
@@ -369,6 +771,7 @@ def fit_reconstructive_program(
 
         for segment_size in segment_candidates:
             segments: list[dict[str, object]] = []
+            segments_legacy: list[dict[str, object]] = []
             for start in range(0, len(source), segment_size):
                 segment_index = start // max(segment_size, 1)
                 morton_key = _morton_key_1d(segment_index, lane=(c_nnz & 0x7))
@@ -389,11 +792,20 @@ def fit_reconstructive_program(
                     "l": len(chunk),
                     "p": _PREDICTOR_ENCODE.get(predictor, predictor),
                     "c": _CODEC_ENCODE.get(codec, codec),
+                    "rb": compressed,
+                }
+                segment_legacy: dict[str, object] = {
+                    "o": start,
+                    "l": len(chunk),
+                    "p": _PREDICTOR_ENCODE.get(predictor, predictor),
+                    "c": _CODEC_ENCODE.get(codec, codec),
                     "r85": _encode_residual_blob(compressed),
                 }
                 if params:
                     segment["pp"] = params
+                    segment_legacy["pp"] = params
                 segments.append(segment)
+                segments_legacy.append(segment_legacy)
 
             payload_v3: dict[str, object] = {
                 "d": _DOMAIN_ENCODE.get(domain, domain),
@@ -401,10 +813,25 @@ def fit_reconstructive_program(
                 "n": len(source),
                 "s": segments,
             }
-            serialized = _serialize_program_payload(payload_v3)
+            payload_v3_legacy: dict[str, object] = {
+                "d": _DOMAIN_ENCODE.get(domain, domain),
+                "ss": segment_size,
+                "n": len(source),
+                "s": segments_legacy,
+            }
+
+            serialized_bin = _serialize_program_payload(payload_v3)
+            serialized_legacy = _serialize_program_payload(payload_v3_legacy)
+            if len(serialized_bin) <= len(serialized_legacy):
+                serialized = serialized_bin
+                selected_payload = payload_v3
+            else:
+                serialized = serialized_legacy
+                selected_payload = payload_v3_legacy
+
             if not best_v3_serialized or len(serialized) < len(best_v3_serialized):
                 best_v3_serialized = serialized
-                best_v3_payload = payload_v3
+                best_v3_payload = selected_payload
 
         if best_v3_payload is not None and len(best_v3_serialized) < len(payload_v2_serialized):
             return {
@@ -418,22 +845,48 @@ def fit_reconstructive_program(
         }
 
     if domain_kind == "text":
+        candidates: list[dict[str, str]] = []
+
         rep = _smallest_repeat_unit(canonical_text)
         if rep is not None:
             unit, count = rep
             # Avoid degenerate full-literal replay where count=1 and unit==full text.
             if count > 1 and len(unit.encode("utf-8")) < len(canonical_text.encode("utf-8")):
                 unit_b64 = base64.b64encode(unit.encode("utf-8")).decode("ascii")
-                return {
-                    "reconstructive_program_type": "repeat-text-v1",
-                    "reconstructive_program_payload": _serialize_program_payload(
-                        {
-                            "unit_b64": unit_b64,
-                            "repeat_count": count,
-                        }
-                    ),
-                }
-        return _latent_residual_program(canonical_text, domain=domain_kind)
+                candidates.append(
+                    {
+                        "reconstructive_program_type": "repeat-text-v1",
+                        "reconstructive_program_payload": _serialize_program_payload(
+                            {
+                                "unit_b64": unit_b64,
+                                "repeat_count": count,
+                            }
+                        ),
+                    }
+                )
+
+        token_delta_candidate = _fit_token_delta_program(canonical_text)
+        if token_delta_candidate is not None:
+            candidates.append(token_delta_candidate)
+
+        phrase_candidate = _fit_phrase_dictionary_program(canonical_text)
+        if phrase_candidate is not None:
+            candidates.append(phrase_candidate)
+
+        latent_candidate = _latent_residual_program(canonical_text, domain=domain_kind)
+        candidates.append(latent_candidate)
+
+        sparse_candidates: list[dict[str, str]] = []
+        for base_candidate in candidates:
+            sparse = _fit_sparse_corrective_program(
+                source_text=canonical_text,
+                base_program=base_candidate,
+            )
+            if sparse is not None:
+                sparse_candidates.append(sparse)
+        candidates.extend(sparse_candidates)
+
+        return _select_smallest_exact_program(source_text=canonical_text, candidates=candidates)
 
     if domain_kind == "json":
         try:
@@ -559,10 +1012,11 @@ def _synthesize_discovered_equation_bytes(
     raise FormatError("Unsupported discovered equation family")
 
 
-def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
+def synthesize_reconstructive_bytes(payload: Mapping[str, str | bytes]) -> bytes:
     """Synthesize canonical bytes from compact reconstructive program payload."""
     program_type = payload.get("reconstructive_program_type", "")
-    raw_program = payload.get("reconstructive_program_payload", "")
+    raw_program_obj = payload.get("reconstructive_program_payload", "")
+    raw_program = raw_program_obj if isinstance(raw_program_obj, str | bytes) else ""
 
     if not raw_program:
         raise FormatError("Missing reconstructive_program_payload")
@@ -618,6 +1072,15 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
             raise FormatError("Invalid unit_b64 in reconstructive program") from exc
         return (unit * repeat_count).encode("utf-8")
 
+    if program_type == "token-delta-grammar-v1":
+        return _synthesize_token_delta_program(program)
+
+    if program_type == "phrase-dictionary-v1":
+        return _synthesize_phrase_dictionary_program(program)
+
+    if program_type == "sparse-corrective-v1":
+        return _synthesize_sparse_corrective_program(program)
+
     if program_type == "json-linear-items-v1":
         count = _coerce_int_field(program.get("count", -1), field_name="count")
         json_style = str(program.get("json_style", "compact"))
@@ -645,7 +1108,13 @@ def synthesize_reconstructive_bytes(payload: dict[str, str]) -> bytes:
         )
         if predictor not in {"zero-v1", "prev-byte-v1", "spectral-byte-v1"}:
             raise FormatError("Unsupported latent residual predictor")
-        if codec not in {"raw-xor-v1", "zlib-xor-v1", "bz2-xor-v1", "lzma-xor-v1"}:
+        if codec not in {
+            "raw-xor-v1",
+            "zlib-xor-v1",
+            "bz2-xor-v1",
+            "lzma-xor-v1",
+            "lzma2raw-xor-v1",
+        }:
             raise FormatError("Unsupported latent residual codec")
         if original_length < 0:
             raise FormatError("Invalid latent residual program parameters")

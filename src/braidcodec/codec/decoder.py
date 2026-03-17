@@ -166,7 +166,7 @@ def _decode_generators_for_block(stream: EncodedStream, block: EncodedBlock) -> 
 
 def _decode_reconstructive_generators_for_block(
     block: EncodedBlock,
-    payload: dict[str, str],
+    payload: dict[str, str | bytes],
 ) -> list[int]:
     """Resolve generator sequence for reconstructive-mode decoding.
 
@@ -175,7 +175,10 @@ def _decode_reconstructive_generators_for_block(
     """
     if payload.get("model_id") != "frequency-manifold":
         raise FormatError("Unsupported reconstructive decode model")
-    seed_vector = payload.get("km_seed_vector", "")
+    seed_obj = payload.get("km_seed_vector", "")
+    seed_vector = (
+        seed_obj.decode("utf-8", errors="ignore") if isinstance(seed_obj, bytes) else str(seed_obj)
+    )
     return reconstructive_inverse_generators(
         block.generators,
         n_strands=block.n_strands,
@@ -245,7 +248,7 @@ def decode(
     mode = stream.metadata.get("preprocessing_mode")
     transport_code = get_reconstructive_transport_code(stream.metadata)
     reconstructive_mode = mode == "reconstructive" or bool(transport_code)
-    reconstructive_payload: dict[str, str] | None = None
+    reconstructive_payload: dict[str, str | bytes] | None = None
     if reconstructive_mode:
         reconstructive_payload = validate_reconstructive_compact_transport_metadata(
             stream.metadata,

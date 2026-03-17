@@ -19,6 +19,11 @@ from braidcodec import decode, encode, keygen, verify
 from braidcodec.codec.schema import parse_reconstructive_payload_metadata
 
 _DISCOVERED_PROGRAM_TYPES = {"discovered-equation-v1", "discovered-braid-equation-v1"}
+_RESIDUAL_FALLBACK_PROGRAM_TYPES = {
+    "latent-residual-v2",
+    "latent-residual-v3",
+    "sparse-corrective-v1",
+}
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -154,7 +159,7 @@ def test_reconstructive_encode_decode_verify(
         extra_info["reconstructive_program_type"] = program_type
         extra_info["used_discovered_equation"] = int(program_type in _DISCOVERED_PROGRAM_TYPES)
         extra_info["used_residual_fallback"] = int(
-            program_type in {"latent-residual-v2", "latent-residual-v3"}
+            program_type in _RESIDUAL_FALLBACK_PROGRAM_TYPES
         )
     extra_info["compact_metadata_form"] = _compact_metadata_form(stream.metadata)
     extra_info["commitment_version"] = _commitment_version(stream.metadata)
@@ -219,9 +224,7 @@ def test_reconstructive_discovery_program_mix(
             program_sidechannel.encode("utf-8")
         )
     extra_info["used_discovered_equation"] = int(used_discovered)
-    extra_info["used_residual_fallback"] = int(
-        program_type in {"latent-residual-v2", "latent-residual-v3"}
-    )
+    extra_info["used_residual_fallback"] = int(program_type in _RESIDUAL_FALLBACK_PROGRAM_TYPES)
     extra_info["equation_library_hit"] = int(audit.get("equation_library_hit", "0"))
     extra_info["equation_library_hit_mode"] = audit.get("equation_library_hit_mode", "none")
     extra_info["compact_metadata_form"] = _compact_metadata_form(stream.metadata)
@@ -275,7 +278,7 @@ def test_reconstructive_library_reuse_progression(
         hits += int(_audit_bundle(stream.metadata).get("equation_library_hit", "0"))
         program_type = _program_type_from_stream(stream.metadata)
         discovered += int(program_type in _DISCOVERED_PROGRAM_TYPES)
-        fallback += int(program_type in {"latent-residual-v2", "latent-residual-v3"})
+        fallback += int(program_type in _RESIDUAL_FALLBACK_PROGRAM_TYPES)
         last_stream = stream
 
     extra_info: dict[str, object] = benchmark.extra_info  # type: ignore[assignment]
