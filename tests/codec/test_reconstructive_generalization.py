@@ -83,6 +83,9 @@ def test_discovery_enabled_falls_back_when_no_equation() -> None:
     assert _payload_program_type(stream.metadata) in {
         "latent-residual-v2",
         "latent-residual-v3",
+        "sparse-corrective-v1",
+        "token-delta-grammar-v1",
+        "phrase-dictionary-v1",
         "repeat-text-v1",
     }
     assert _audit_value(stream.metadata, "equation_library_hit") == "0"

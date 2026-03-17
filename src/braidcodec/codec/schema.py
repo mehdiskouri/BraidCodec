@@ -74,20 +74,26 @@ _RECONSTRUCTIVE_OPTIONAL_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "equation_symbolic_hash",
     }
 )
+_HDF5_METADATA_MSGPACK_PREFIX = b"~m1:"
 
 _TRANSPORT_TYPE_TO_PROGRAM: dict[str, str] = {
     "dbe1": "discovered-braid-equation-v1",
     "de1": "discovered-equation-v1",
     "rt1": "repeat-text-v1",
+    "td1": "token-delta-grammar-v1",
+    "pd1": "phrase-dictionary-v1",
     "jli1": "json-linear-items-v1",
     "jl1": "json-literal-v1",
     "ls1": "logs-seq-v1",
     "lr2": "latent-residual-v2",
     "lr3": "latent-residual-v3",
+    "lr4": "sparse-corrective-v1",
 }
 
 
-def _parse_reconstructive_compact_header(metadata: Mapping[str, str]) -> dict[str, str] | None:
+def _parse_reconstructive_compact_header(
+    metadata: Mapping[str, object],
+) -> dict[str, str | bytes] | None:
     """Parse packed compact reconstructive header if present."""
     blob = str(metadata.get(_RECONSTRUCTIVE_HEADER_KEY_SHORT, ""))
     if not blob:
@@ -108,28 +114,36 @@ def _parse_reconstructive_compact_header(metadata: Mapping[str, str]) -> dict[st
     if not isinstance(obj, dict):
         raise FormatError("Compact reconstructive header must decode to object")
     transport_code = str(obj.get("t", ""))
-    sidechannel_blob = str(obj.get("p", ""))
-    if not transport_code or not sidechannel_blob:
+    sidechannel_obj = obj.get("p", "")
+    if not isinstance(sidechannel_obj, str | bytes):
+        raise FormatError("Compact reconstructive header sidechannel type unsupported")
+    if not transport_code or not sidechannel_obj:
         raise FormatError("Compact reconstructive header missing required fields")
     return {
         "t": transport_code,
-        "p": sidechannel_blob,
+        "p": sidechannel_obj,
     }
 
 
-def _get_reconstructive_program_sidechannel(metadata: Mapping[str, str]) -> str:
+def _get_reconstructive_program_sidechannel(metadata: Mapping[str, object]) -> str | bytes:
     """Return reconstructive program side-channel blob if present."""
     header = _parse_reconstructive_compact_header(metadata)
     if header is not None:
-        return header["p"]
-    return str(metadata.get(_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY_SHORT, ""))
+        sidechannel = header["p"]
+        if not isinstance(sidechannel, str | bytes):
+            raise FormatError("Compact reconstructive sidechannel type unsupported")
+        return sidechannel
+    sidechannel_obj = metadata.get(_RECONSTRUCTIVE_PROGRAM_PAYLOAD_BIN_KEY_SHORT, "")
+    if not isinstance(sidechannel_obj, str | bytes):
+        raise FormatError("Compact reconstructive sidechannel type unsupported")
+    return sidechannel_obj
 
 
-def _get_reconstructive_transport_code(metadata: Mapping[str, str]) -> str:
+def _get_reconstructive_transport_code(metadata: Mapping[str, object]) -> str:
     """Return reconstructive transport code from compact metadata keys."""
     header = _parse_reconstructive_compact_header(metadata)
     if header is not None:
-        return header["t"]
+        return str(header["t"])
     return str(metadata.get(_RECONSTRUCTIVE_TRANSPORT_KEY_SHORT, ""))
 
 
@@ -141,19 +155,19 @@ def _split_reconstructive_transport_code(code: str) -> tuple[str, str]:
     return code, ""
 
 
-def get_reconstructive_transport_code(metadata: Mapping[str, str]) -> str:
+def get_reconstructive_transport_code(metadata: Mapping[str, object]) -> str:
     """Public helper to resolve compact reconstructive transport code."""
     return _get_reconstructive_transport_code(metadata)
 
 
-def _get_reconstructive_transport_type_code(metadata: Mapping[str, str]) -> str:
+def _get_reconstructive_transport_type_code(metadata: Mapping[str, object]) -> str:
     """Return reconstructive transport type code from compact metadata keys."""
     code = _get_reconstructive_transport_code(metadata)
     _, inline_type = _split_reconstructive_transport_code(code)
     return inline_type
 
 
-def _get_reconstructive_commitment_v3(metadata: Mapping[str, str]) -> str:
+def _get_reconstructive_commitment_v3(metadata: Mapping[str, object]) -> str:
     """Return reconstructive commitment v3 digest from current key."""
     return str(metadata.get(_RECONSTRUCTIVE_COMMITMENT_V3_KEY_SHORT, ""))
 
@@ -400,7 +414,7 @@ class EncodedStream:
     checksum: bytes  # 32-byte BLAKE3 digest of original data
     version: int = _CURRENT_VERSION
     timestamp: int = field(default_factory=lambda: time.time_ns())
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, str | bytes] = field(default_factory=dict)
 
     # ── Wire format serialization ─────────────────────────────────────────
 
@@ -460,7 +474,11 @@ class EncodedStream:
 
             h5.create_dataset("checksum", data=np.frombuffer(self.checksum, dtype=np.uint8))
 
-            metadata_blob = json.dumps(self.metadata, separators=(",", ":")).encode("utf-8")
+            try:
+                metadata_blob = json.dumps(self.metadata, separators=(",", ":")).encode("utf-8")
+            except TypeError:
+                packed_meta = msgpack.packb(self.metadata, use_bin_type=True)
+                metadata_blob = _HDF5_METADATA_MSGPACK_PREFIX + packed_meta
             h5.create_dataset("metadata_json", data=np.frombuffer(metadata_blob, dtype=np.uint8))
 
             n_blocks = len(self.blocks)
@@ -644,8 +662,14 @@ class EncodedStream:
 
             checksum = bytes(np.asarray(h5["checksum"], dtype=np.uint8).tobytes())
             metadata_blob = bytes(np.asarray(h5["metadata_json"], dtype=np.uint8).tobytes())
-            metadata_obj = json.loads(metadata_blob.decode("utf-8")) if metadata_blob else {}
-            metadata = {str(k): str(v) for k, v in metadata_obj.items()}
+            metadata_obj: object = {}
+            if metadata_blob:
+                if metadata_blob.startswith(_HDF5_METADATA_MSGPACK_PREFIX):
+                    packed = metadata_blob[len(_HDF5_METADATA_MSGPACK_PREFIX) :]
+                    metadata_obj = msgpack.unpackb(packed, raw=False)
+                else:
+                    metadata_obj = json.loads(metadata_blob.decode("utf-8"))
+            metadata = _coerce_metadata_map(metadata_obj)
 
             blocks_group = h5["blocks"]
             block_index = np.asarray(blocks_group["block_index"], dtype=np.int64)
@@ -854,11 +878,25 @@ class EncodedStream:
             total_bytes=int(header["total_bytes"]),
             checksum=bytes(header["checksum"]),
             timestamp=int(header["timestamp"]),
-            metadata={str(k): str(v) for k, v in header.get("metadata", {}).items()},
+            metadata=_coerce_metadata_map(header.get("metadata", {})),
         )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
+
+
+def _coerce_metadata_map(raw_metadata: object) -> dict[str, str | bytes]:
+    """Normalize metadata maps while preserving binary sidechannel values."""
+    if not isinstance(raw_metadata, dict):
+        return {}
+    out: dict[str, str | bytes] = {}
+    for key, value in raw_metadata.items():
+        skey = str(key)
+        if isinstance(value, (bytes, str)):
+            out[skey] = value
+        else:
+            out[skey] = str(value)
+    return out
 
 
 def _opt_float(value: object) -> float | None:
@@ -1070,7 +1108,9 @@ def build_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def parse_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
+def parse_reconstructive_payload_metadata(
+    metadata: Mapping[str, object],
+) -> dict[str, str | bytes]:
     """Parse reconstructive payload from compact transport metadata only."""
     compact_program = _parse_compact_transport_program(metadata)
     if compact_program is not None:
@@ -1078,7 +1118,9 @@ def parse_reconstructive_payload_metadata(metadata: Mapping[str, str]) -> dict[s
     raise FormatError("Missing reconstructive compact transport code")
 
 
-def _parse_compact_transport_program(metadata: Mapping[str, str]) -> dict[str, str] | None:
+def _parse_compact_transport_program(
+    metadata: Mapping[str, object],
+) -> dict[str, str | bytes] | None:
     """Parse compact reconstructive transport metadata into program payload."""
     full_code = _get_reconstructive_transport_code(metadata)
     if not full_code:
@@ -1101,9 +1143,9 @@ def _parse_compact_transport_program(metadata: Mapping[str, str]) -> dict[str, s
 
 
 def validate_reconstructive_compact_transport_metadata(
-    metadata: Mapping[str, str],
+    metadata: Mapping[str, object],
     blocks: tuple[EncodedBlock, ...],
-) -> dict[str, str]:
+) -> dict[str, str | bytes]:
     """Validate compact reconstructive transport metadata and commitment."""
     full_code = _get_reconstructive_transport_code(metadata)
     code, _ = _split_reconstructive_transport_code(full_code)
@@ -1154,14 +1196,16 @@ def compute_reconstructive_commitment_v3(
     *,
     transport_code: str,
     blocks: tuple[EncodedBlock, ...],
-    program_sidechannel_blob: str = "",
+    program_sidechannel_blob: str | bytes = "",
 ) -> str:
     """Compute canonical compact commitment object digest (schema v3)."""
     family, _ = _split_reconstructive_transport_code(transport_code)
     canonical_obj = {
         "embedded_blocks_digest": _compute_reconstructive_blocks_digest(blocks),
         "program_sidechannel_digest": blake3.blake3(
-            program_sidechannel_blob.encode("utf-8")
+            program_sidechannel_blob
+            if isinstance(program_sidechannel_blob, bytes)
+            else program_sidechannel_blob.encode("utf-8")
         ).hexdigest()
         if program_sidechannel_blob
         else "",

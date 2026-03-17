@@ -443,6 +443,9 @@ class TestEncodePreprocessingModes:
         assert payload["reconstructive_program_type"] in {
             "latent-residual-v2",
             "latent-residual-v3",
+            "sparse-corrective-v1",
+            "token-delta-grammar-v1",
+            "phrase-dictionary-v1",
         }
         assert "rpb" in stream.metadata or "reconstructive_program_payload_bin" in stream.metadata
         program_payload = parse_reconstructive_program_payload(
@@ -451,6 +454,9 @@ class TestEncodePreprocessingModes:
         if payload["reconstructive_program_type"] == "latent-residual-v2":
             predictor = program_payload.get("predictor", program_payload.get("p"))
             codec = program_payload.get("codec", program_payload.get("c"))
+            residual_payload = program_payload.get("residual_bytes", program_payload.get("rb"))
+            if residual_payload is None:
+                residual_payload = program_payload.get("residual_b85", program_payload.get("r85"))
             assert predictor in {
                 "zero-v1",
                 "prev-byte-v1",
@@ -464,11 +470,14 @@ class TestEncodePreprocessingModes:
                 "zlib-xor-v1",
                 "bz2-xor-v1",
                 "lzma-xor-v1",
+                "lzma2raw-xor-v1",
                 "r",
                 "z",
                 "b",
                 "l",
+                "x",
             }
+            assert isinstance(residual_payload, str | bytes | bytearray)
         else:
             segments = program_payload.get("segments", program_payload.get("s"))
             original_length = program_payload.get("original_length", program_payload.get("n"))

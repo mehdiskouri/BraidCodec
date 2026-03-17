@@ -1,0 +1,97 @@
+{
+  "data_source": {
+    "cache_path": "benchmarks/public_showcase/neelnanda_pile_cache.txt",
+    "config": "default",
+    "dataset": "NeelNanda/pile-10k",
+    "source_rows": 0,
+    "split": "train",
+    "used_cache": true
+  },
+  "headline": {
+    "braid_wire_bytes": 195475,
+    "braid_wire_reduction_pct": 61.82,
+    "braid_wire_vs_raw": 0.3818,
+    "raw_bytes": 512000,
+    "target_label": "500KB"
+  },
+  "rows": [
+    {
+      "braid_hdf5_bytes": 62421,
+      "braid_wire_bytes": 44250,
+      "decode_ms": 11.468,
+      "decoded_sha256": "9ae355dfe1067dad97abc3f1786b4976a3f36fc399f1f72e860f8d036c064813",
+      "encode_ms": 20943.618,
+      "exact_match": true,
+      "gzip_bytes": 39513,
+      "lzma_bytes": 36304,
+      "raw_bytes": 102400,
+      "reconstructive_program_payload_bytes": 44074,
+      "reconstructive_program_type": "latent-residual-v2",
+      "source_rows": 0,
+      "source_sha256": "9ae355dfe1067dad97abc3f1786b4976a3f36fc399f1f72e860f8d036c064813",
+      "target_bytes": 102400,
+      "target_label": "100KB",
+      "used_discovered_equation": false,
+      "used_fallback_residual": true,
+      "verify_ms": 11.058,
+      "wire_vs_gzip_ratio": 1.119885,
+      "zlib_bytes": 39501
+    },
+    {
+      "braid_hdf5_bytes": 98449,
+      "braid_wire_bytes": 80280,
+      "decode_ms": 21.672,
+      "decoded_sha256": "4ef44bd989a33268b7c1398a6a99711c8c435a7f895e469f05a492054fc29686",
+      "encode_ms": 36770.65,
+      "exact_match": true,
+      "gzip_bytes": 73219,
+      "lzma_bytes": 65700,
+      "raw_bytes": 204800,
+      "reconstructive_program_payload_bytes": 80102,
+      "reconstructive_program_type": "latent-residual-v2",
+      "source_rows": 0,
+      "source_sha256": "4ef44bd989a33268b7c1398a6a99711c8c435a7f895e469f05a492054fc29686",
+      "target_bytes": 204800,
+      "target_label": "200KB",
+      "used_discovered_equation": false,
+      "used_fallback_residual": true,
+      "verify_ms": 20.788,
+      "wire_vs_gzip_ratio": 1.096437,
+      "zlib_bytes": 73207
+    },
+    {
+      "braid_hdf5_bytes": 213644,
+      "braid_wire_bytes": 195475,
+      "decode_ms": 53.23,
+      "decoded_sha256": "348c68bc34403ac19c57b9ea191b6820f51cab7f5a184c998803e54e5ed0b9bc",
+      "encode_ms": 92036.505,
+      "exact_match": true,
+      "gzip_bytes": 180479,
+      "lzma_bytes": 156228,
+      "raw_bytes": 512000,
+      "reconstructive_program_payload_bytes": 195297,
+      "reconstructive_program_type": "latent-residual-v2",
+      "source_rows": 0,
+      "source_sha256": "348c68bc34403ac19c57b9ea191b6820f51cab7f5a184c998803e54e5ed0b9bc",
+      "target_bytes": 512000,
+      "target_label": "500KB",
+      "used_discovered_equation": false,
+      "used_fallback_residual": true,
+      "verify_ms": 53.193,
+      "wire_vs_gzip_ratio": 1.08309,
+      "zlib_bytes": 180467
+    }
+  ],
+  "run_id": "20260317_142858",
+  "run_label": "2026-03-17 14:28:58 UTC",
+  "target_sizes_bytes": [
+    102400,
+    204800,
+    512000
+  ],
+  "totals": {
+    "all_exact": true,
+    "exact_matches": 3,
+    "rows": 3
+  }
+}

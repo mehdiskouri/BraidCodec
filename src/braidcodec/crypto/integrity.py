@@ -399,7 +399,12 @@ def _decode_generators_for_block(stream: EncodedStream, block: EncodedBlock) -> 
         payload = validate_reconstructive_compact_transport_metadata(
             stream.metadata, stream.blocks
         )
-        seed_vector = payload.get("km_seed_vector", "")
+        seed_obj = payload.get("km_seed_vector", "")
+        seed_vector = (
+            seed_obj.decode("utf-8", errors="ignore")
+            if isinstance(seed_obj, bytes)
+            else str(seed_obj)
+        )
         return reconstructive_inverse_generators(
             block.generators,
             n_strands=block.n_strands,
